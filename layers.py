@@ -122,6 +122,9 @@ class Shift_gcn(nn.Module):
         super(Shift_gcn, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
+        # Use the graph's joint count.  The previous implementation was
+        # hard-coded to 20 joints (UCLA), which breaks NTU's 25-joint input.
+        self.num_point = int(A.shape[-1])
         if in_channels != out_channels:
             self.down = nn.Sequential(
                 nn.Conv2d(in_channels, out_channels, 1),
@@ -147,22 +150,19 @@ class Shift_gcn(nn.Module):
 
         # self.bn = nn.BatchNorm1d(25*out_channels)
         # self.relu = nn.ReLU()
-        if self.in_channels == 3:
-            self.group = 20
-        else:
-            self.group = 20
+        self.group = self.num_point
 
-        self.Linear_weight = nn.Parameter(torch.zeros((in_channels*20)//self.group ,(out_channels*20)//self.group,requires_grad=True,device='cuda'),requires_grad=True)
-        nn.init.normal_(self.Linear_weight, 0,math.sqrt(1.0 / ((out_channels*20)//self.group)))
+        self.Linear_weight = nn.Parameter(torch.zeros((in_channels*self.num_point)//self.group ,(out_channels*self.num_point)//self.group,requires_grad=True,device='cuda'),requires_grad=True)
+        nn.init.normal_(self.Linear_weight, 0,math.sqrt(1.0 / ((out_channels*self.num_point)//self.group)))
 
         self.Linear_bias = nn.Parameter(torch.zeros(1,1,out_channels,requires_grad=True,device='cuda'),requires_grad=True)
         nn.init.constant_(self.Linear_bias, 0)
 
-        self.Feature_Mask = nn.Parameter(torch.ones(1,20,in_channels, requires_grad=True,device='cuda'),requires_grad=True)
+        self.Feature_Mask = nn.Parameter(torch.ones(1,self.num_point,in_channels, requires_grad=True,device='cuda'),requires_grad=True)
         nn.init.constant_(self.Feature_Mask, 0)
 
 
-        self.bn = nn.BatchNorm1d(20*out_channels)
+        self.bn = nn.BatchNorm1d(self.num_point*out_channels)
         self.relu = nn.ReLU()
 
         for m in self.modules():
@@ -183,16 +183,16 @@ class Shift_gcn(nn.Module):
         #     for j in range(out_channels):
         #         index_array[i*out_channels + j] = (i*out_channels + j - j*out_channels)%(out_channels*25)
         # self.shift_out = nn.Parameter(torch.from_numpy(index_array),requires_grad=False)
-        index_array = np.empty(20*in_channels).astype(np.int64)
-        for i in range(20):
+        index_array = np.empty(self.num_point * in_channels, dtype=np.int64)
+        for i in range(self.num_point):
             for j in range(in_channels):
-                index_array[i*in_channels + j] = (i*in_channels + j + j*in_channels)%(in_channels*20)
+                index_array[i*in_channels + j] = (i*in_channels + j + j*in_channels)%(in_channels*self.num_point)
         self.shift_in = nn.Parameter(torch.from_numpy(index_array),requires_grad=False)
 
-        index_array = np.empty(20*out_channels).astype(np.int64)
-        for i in range(20):
+        index_array = np.empty(self.num_point * out_channels, dtype=np.int64)
+        for i in range(self.num_point):
             for j in range(out_channels):
-                index_array[i*out_channels + j] = (i*out_channels + j - j*out_channels)%(out_channels*20)
+                index_array[i*out_channels + j] = (i*out_channels + j - j*out_channels)%(out_channels*self.num_point)
         self.shift_out = nn.Parameter(torch.from_numpy(index_array),requires_grad=False)
         
 
