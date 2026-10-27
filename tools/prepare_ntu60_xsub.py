@@ -71,8 +71,8 @@ def convert(raw_dir: Path, output: Path, max_frames: int) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--raw-dir", type=Path, default=Path("/root/autodl-fs/nturgbd_raw"))
-    parser.add_argument("--output", type=Path, default=Path("/root/autodl-fs/ntu/NTU60_CS.npz"))
+    parser.add_argument("--raw-dir", type=Path, default=Path("/root/autodl-tmp/ntu60/nturgbd_raw"))
+    parser.add_argument("--output", type=Path, default=Path("/root/autodl-tmp/ntu60/ntu/NTU60_CS.npz"))
     parser.add_argument("--max-frames", type=int, default=300)
     args = parser.parse_args()
     convert(args.raw_dir, args.output, args.max_frames)

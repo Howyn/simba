@@ -128,7 +128,7 @@ For any questions, feel free to raise an issue !
 
 The repository includes a single-GPU configuration at
 `config/nturgbd-cross-subject/joint_autodl.yaml`. It reads the processed
-dataset from `/root/autodl-fs/ntu/NTU60_CS.npz`, so the raw archive and the
+dataset from `/root/autodl-tmp/ntu60/ntu/NTU60_CS.npz`, so the raw archive and the
 large generated data file stay outside the Git repository.
 
 On an Ubuntu AutoDL instance, run:
@@ -137,9 +137,10 @@ On an Ubuntu AutoDL instance, run:
 cd /root/autodl-tmp
 git clone git@github.com:Howyn/simba.git Simba-main
 cd Simba-main
-python3 -m venv .venv
+python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 python -m pip install -r requirements-autodl.txt
 python -m pip install -e . --no-build-isolation
 python -m pip install -e torchlight
@@ -148,14 +149,14 @@ python -m pip install -e torchlight
 Extract the NTU archive outside the project and generate the NPZ file:
 
 ```bash
-mkdir -p /root/autodl-fs/nturgbd_raw
-unzip /root/autodl-tmp/nturgbd_skeletons_s001_to_s017.zip -d /root/autodl-fs/nturgbd_raw
+mkdir -p /root/autodl-tmp/ntu60/nturgbd_raw
+unzip /root/autodl-tmp/nturgbd_skeletons_s001_to_s017.zip -d /root/autodl-tmp/ntu60/nturgbd_raw
 python tools/prepare_ntu60_xsub.py
 ```
 
 The converter prints the train and test shapes. They should be compatible
 with `feeders.feeder_ntu.Feeder` and the output should exist at
-`/root/autodl-fs/ntu/NTU60_CS.npz`.
+`/root/autodl-tmp/ntu60/ntu/NTU60_CS.npz`.
 
 Run a one-epoch smoke test first by temporarily changing `num_epoch` to `1`
 in the AutoDL config, then restore it to `50` for the experiment:
