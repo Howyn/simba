@@ -11,6 +11,7 @@ matplotlib>=3.7
 termcolor>=2.3
 torchnet>=0.0.4
 einops>=0.6
+causal-conv1d==1.1.1
 wandb>=0.16
 torchmetrics>=1.2
 transformers==4.36.2
