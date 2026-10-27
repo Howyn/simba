@@ -450,7 +450,9 @@ class unit_vit(nn.Module):
 class TCN_ViT_unit(nn.Module):
     def __init__(self, in_channels, out_channels, A, stride=1, num_of_heads=6, residual=True, kernel_size=5, dilations=[1,2], pe=False, num_point=25, layer=0):
         super(TCN_ViT_unit, self).__init__()
-        self.mamba= MambaBlock(embed_dim=500) #500
+        # Flattened joint/channel features are fed to Mamba.  500 only
+        # matches UCLA's 20 joints x 25 channels; NTU uses 25 joints.
+        self.mamba = MambaBlock(embed_dim=num_point * 25)
         # self.mamba_2 = MambaBlock(embed_dim=512)
         self.shift_gcn = Shift_gcn(in_channels,out_channels,A)
         self.shift_gcn_2 = Shift_gcn(out_channels,108,A).to('cuda')
@@ -547,7 +549,7 @@ class TCN_ViT_unit(nn.Module):
         # linear_vit = nn.Linear(v*c, 512, dtype=torch.float16)
         # linear_vit = linear_vit.to('cuda')
         # x_dash = linear_vit(x_dash)
-        x_dash = self.mamba(x_dash)
+        x_dash = self.mamba(x_dash.view(n, t, v * c))
         # linear_vit_2=nn.Linear(512,v*c, dtype=torch.float16)
         # linear_vit_2=linear_vit_2.to('cuda')
         # x_dash=linear_vit_2(x_dash)
