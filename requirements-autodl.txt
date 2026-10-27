@@ -13,3 +13,5 @@ torchnet>=0.0.4
 einops>=0.6
 wandb>=0.16
 torchmetrics>=1.2
+transformers==4.36.2
+huggingface-hub>=0.19.3,<1
