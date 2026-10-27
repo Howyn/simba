@@ -1,4 +1,5 @@
-##!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
 #python main.py  \
 #--config config/nturgbd120-cross-subject/joint.yaml --model model.Hyperformer.Model --work-dir work_dir/ntu120/csub/Hyperformer_joint --device 2 3 --base-lr 2.5e-2 
@@ -20,8 +21,11 @@
 #python main.py  \
 #--config config/kinetics-skeleton/joint.yaml --model model.Hyperformer.Model --device 0 
 
-python main.py  \
---config config/ucla/joint.yaml --model model.Hyperformer.Model --work-dir work_dir/ucla/Hyperformer_joint_9
+python main.py \
+  --config config/nturgbd-cross-subject/joint_autodl.yaml \
+  --model model.Hyperformer.Model \
+  --work-dir work_dir/ntu60/xsub/simba_joint \
+  --device 0
 
 #python main.py  \
 #--config config/ucla/bone.yaml --model model.Hyperformer.Model --work-dir work_dir/ucla/Hyperformer_bone_2

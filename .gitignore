@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.idea/
+work_dir/
+data/
+*.npz
+*.pt
+*.pth
+*.log
+*.egg-info/
