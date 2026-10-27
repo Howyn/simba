@@ -76,7 +76,13 @@ class Feeder(Dataset):
         data_numpy = self.data[index]
         label = self.label[index]
         data_numpy = np.array(data_numpy)
-        valid_frame_num = np.sum(data_numpy.sum(0).sum(-1).sum(-1) != 0)
+        # Do not sum coordinates to detect valid frames: positive and negative
+        # joint coordinates can cancel each other and produce a false zero.
+        valid_frames = np.any(data_numpy != 0, axis=(0, 2, 3))
+        valid_frame_num = int(valid_frames.sum())
+        # Keep the crop/resize path valid for a malformed all-zero sequence.
+        if valid_frame_num == 0:
+            valid_frame_num = 1
         # reshape Tx(MVC) to CTVM
         data_numpy = tools.valid_crop_resize(data_numpy, valid_frame_num, self.p_interval, self.window_size)
         if self.random_rot:
