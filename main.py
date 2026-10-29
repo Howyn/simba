@@ -14,6 +14,7 @@ from sklearn.metrics import confusion_matrix
 import csv
 import numpy as np
 import glob
+import re
 import torch.nn.functional as F
 import torch
 import torch.backends.cudnn as cudnn
@@ -93,13 +94,17 @@ def get_mmd_loss(z, z_prior, y, num_cls):
     mmd_loss = F.mse_loss(z_mean[y_valid], z_prior[y_valid].to(z.device))
     return mmd_loss, l2_z_mean, z_mean[y_valid]
 
-def epoch_saving(epoch, model, optimizer, filename):
+def epoch_saving(epoch, model, optimizer, filename, *, global_step=None,
+                 best_accuracy=None, best_epoch=None):
     state_dict = model.state_dict()
     weights = OrderedDict([[k.split('module.')[-1], v.cpu()] for k, v in state_dict.items()])
     torch.save({
                     'epoch': epoch,
                     'model_state_dict': weights,
                     'optimizer_state_dict': optimizer.state_dict(),
+                    'global_step': global_step,
+                    'best_accuracy': best_accuracy,
+                    'best_epoch': best_epoch,
                     }, filename) #just change to your preferred folder/filename
     
 def epoch_saving_2(epoch, model, optimizer, lr_scheduler, filename):
@@ -117,6 +122,12 @@ def update_dict(dict):
     for k, v in dict.items():
         new_dict[k.replace('module.', '')] = v
     return new_dict
+
+
+def checkpoint_step(path):
+    """Extract the optional global step from runs-<epoch>-<step>.pt."""
+    match = re.search(r'-\d+-(\d+)\.pt$', os.path.basename(path))
+    return int(match.group(1)) if match else 0
 
 def get_parser():
 
@@ -298,7 +309,9 @@ class Processor():
         if arg.phase == 'train':
             if not arg.train_feeder_args['debug']:
                 arg.model_saved_name = os.path.join(arg.work_dir, 'runs')
-                if os.path.isdir(arg.model_saved_name):
+                if os.path.isdir(arg.model_saved_name) and arg.resume:
+                    print('Resuming with existing TensorBoard directory:', arg.model_saved_name)
+                elif os.path.isdir(arg.model_saved_name):
                     print('log_dir: ', arg.model_saved_name, 'already exist')
                     answer = input('delete it? y/n:')
                     if answer == 'y':
@@ -314,6 +327,11 @@ class Processor():
         self.global_step = 0
         # pdb.set_trace()
         self.load_model()
+        self.use_fr_head = getattr(self.model, 'fr_head', None) is not None
+        if self.use_fr_head and isinstance(self.arg.device, list) and len(self.arg.device) > 1:
+            raise ValueError('FR-Head prototype updates currently support one GPU only')
+        if self.use_fr_head and self.arg.ema:
+            raise ValueError('FR-Head prototype buffers are not supported with model EMA')
         self.model = self.model.cuda(self.output_device)
         if self.arg.phase == 'model_size':
             pass
@@ -323,8 +341,15 @@ class Processor():
             self.load_data()
             
         self.lr = self.arg.base_lr
-        self.best_acc = 0
+        self.best_acc = -1
         self.best_acc_epoch = 0
+        best_path = os.path.join(self.arg.work_dir, 'runs-best.pt')
+        if self.arg.resume and os.path.isfile(best_path):
+            best_checkpoint = torch.load(best_path, map_location='cpu')
+            if (best_checkpoint.get('best_accuracy') is not None
+                    and best_checkpoint.get('epoch', -1) < self.arg.start_epoch):
+                self.best_acc = best_checkpoint['best_accuracy']
+                self.best_acc_epoch = best_checkpoint['best_epoch']
 
         self.best_acc_ema = 0
         self.best_acc_epoch_ema = 0
@@ -377,13 +402,18 @@ class Processor():
         # self.loss2 = nn.CrossEntropyLoss().cuda(output_device)
 
         if self.arg.weights:
-            self.global_step = int(self.arg.weights[:-3].split('-')[-1])
+            self.global_step = checkpoint_step(self.arg.weights)
             self.print_log('Load weights from {}.'.format(self.arg.weights))
             if '.pkl' in self.arg.weights:
                 with open(self.arg.weights, 'r') as f:
                     weights = pickle.load(f)
             else:
-                weights = torch.load(self.arg.weights)
+                weights = torch.load(self.arg.weights, map_location='cpu')
+
+            # Training checkpoints include optimizer and epoch metadata; older
+            # standalone weight files are still accepted.
+            if isinstance(weights, dict) and 'model_state_dict' in weights:
+                weights = weights['model_state_dict']
 
             # weights = OrderedDict([[k.split('module.')[-1], v.cuda(output_device)] for k, v in weights.items()])
             weights = OrderedDict([[k.split('module.')[-1], v] for k, v in weights.items()])
@@ -409,7 +439,7 @@ class Processor():
                 self.model.load_state_dict(state)
         
         if self.arg.resume:
-            self.global_step = int(self.arg.resume[:-3].split('-')[-1])
+            self.global_step = checkpoint_step(self.arg.resume)
             self.print_log('Resume weights from {}.'.format(self.arg.resume))
             if '.pkl' in self.arg.resume:
                 with open(self.arg.resume, 'r') as f:
@@ -430,6 +460,8 @@ class Processor():
                             self.print_log('Can Not Remove Weights: {}.'.format(key))
             
             self.arg.start_epoch = checkpoint['epoch'] + 1
+            if checkpoint.get('global_step') is not None:
+                self.global_step = checkpoint['global_step']
             try:
                 self.model.load_state_dict(weights)
             except:
@@ -633,7 +665,9 @@ class Processor():
                 # lambda_1=1e-4
                 # lambda_2=1e-1
                 # loss = lambda_2* mmd_loss + lambda_1* l2_z_mean + loss
-            loss2 = torch.zeros_like(loss).cuda(loss.device)
+            # With FR enabled the model returns the weighted auxiliary loss as
+            # its second output. Baseline models keep returning the old value.
+            loss2 = z if self.use_fr_head else torch.zeros_like(loss)
 
 
 
@@ -677,7 +711,8 @@ class Processor():
             # torch.save(weights, self.arg.model_saved_name + '-' + str(epoch+1) + '-' + str(int(self.global_step)) + '.pt')
             filename= self.arg.model_saved_name + '-' + str(epoch+1) + '-' + str(int(self.global_step)) + '.pt'
             # epoch_saving(epoch, self.model.module, self.optimizer, filename)
-            epoch_saving(epoch, self.model, self.optimizer, filename)
+            epoch_saving(epoch, self.model, self.optimizer, filename,
+                         global_step=int(self.global_step))
             # epoch_saving_2(epoch, self.model, self.optimizer, self.lr_scheduler, filename)
 
     def eval(self, epoch, save_score=False, loader_name=['test'], wrong_file=None, result_file=None):
@@ -858,22 +893,35 @@ class Processor():
     def start(self):
         if self.arg.phase == 'train':
             self.print_log('Parameters:\n{}\n'.format(str(vars(self.arg))))
-            self.global_step = self.arg.start_epoch * len(self.data_loader['train']) / self.arg.batch_size
+            if not self.arg.resume:
+                self.global_step = self.arg.start_epoch * len(self.data_loader['train'])
             def count_parameters(model):
                 return sum(p.numel() for p in model.parameters() if p.requires_grad)
             self.print_log(f'# Parameters: {count_parameters(self.model)}')
             for epoch in range(self.arg.start_epoch, self.arg.num_epoch):
-                save_model = (((epoch + 1) % self.arg.save_interval == 0) or (
-                        epoch + 1 == self.arg.num_epoch)) and (epoch+1) > self.arg.save_epoch
-
+                # Always save the final epoch so short smoke runs (for example,
+                # num_epoch=1 with the default save_epoch=10) still produce a
+                # checkpoint for the best-model evaluation below.
+                save_model = (epoch + 1 == self.arg.num_epoch) or (
+                    ((epoch + 1) % self.arg.save_interval == 0)
+                    and (epoch + 1) > self.arg.save_epoch
+                )
                 # self.lr_scheduler.step(epoch)
                 self.train(epoch, save_model=save_model)
                 if self.arg.ema:
                     ema_update(self.model, self.model_ema, itr=epoch)
+                previous_best = self.best_acc
                 self.eval(epoch, save_score=self.arg.save_score, loader_name=['test'])
+                if self.best_acc > previous_best:
+                    # The best epoch need not coincide with a periodic save.
+                    epoch_saving(epoch, self.model, self.optimizer,
+                                 self.arg.model_saved_name + '-best.pt',
+                                 global_step=int(self.global_step),
+                                 best_accuracy=self.best_acc,
+                                 best_epoch=self.best_acc_epoch)
 
             # test the best model
-            weights_path = glob.glob(os.path.join(self.arg.work_dir, 'runs-'+str(self.best_acc_epoch)+'*'))[0]
+            weights_path = self.arg.model_saved_name + '-best.pt'
             # print(weights_path)
             checkpoint = torch.load(weights_path, map_location=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"))
             
@@ -885,7 +933,8 @@ class Processor():
             #     if len(self.arg.device) > 1:
             #         weights = OrderedDict([['module.'+k, v.cuda(self.output_device)] for k, v in weights.items()])
             
-            self.model.load_state_dict(weights)
+            target_model = self.model.module if isinstance(self.model, nn.DataParallel) else self.model
+            target_model.load_state_dict(weights)
 
             wf = weights_path.replace('.pt', '_wrong.txt')
             rf = weights_path.replace('.pt', '_right.txt')
