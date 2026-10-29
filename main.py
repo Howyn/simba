@@ -215,6 +215,14 @@ def get_parser():
         type=int,
         default=48,
         help='the number of worker for data loader')
+    parser.add_argument('--precision', choices=['fp32', 'bf16'], default='fp32',
+                        help='training precision; evaluation remains FP32')
+    parser.add_argument('--tf32', type=str2bool, default=None,
+                        help='enable/disable TF32 for CUDA matmul and cuDNN; default leaves PyTorch settings unchanged')
+    parser.add_argument('--persistent-workers', type=str2bool, default=False,
+                        help='keep data-loader workers alive between epochs')
+    parser.add_argument('--prefetch-factor', type=int, default=16,
+                        help='batches prefetched per worker, ignored when num-worker is 0')
     parser.add_argument(
         '--train-feeder-args',
         # action=DictAction,
@@ -305,6 +313,18 @@ class Processor():
 
     def __init__(self, arg):
         self.arg = arg
+        if arg.log_interval < 1:
+            raise ValueError('log-interval must be at least 1')
+        if arg.num_worker < 0 or arg.prefetch_factor < 1:
+            raise ValueError('num-worker must be non-negative and prefetch-factor positive')
+        if arg.tf32 is not None:
+            torch.backends.cuda.matmul.allow_tf32 = arg.tf32
+            torch.backends.cudnn.allow_tf32 = arg.tf32
+        if arg.precision == 'bf16':
+            device_index = arg.device[0] if isinstance(arg.device, list) else arg.device
+            with torch.cuda.device(device_index):
+                if not torch.cuda.is_bf16_supported():
+                    raise RuntimeError('BF16 is not supported by the selected CUDA device; use --precision fp32')
         self.save_arg()
         if arg.phase == 'train':
             if not arg.train_feeder_args['debug']:
@@ -371,23 +391,31 @@ class Processor():
     def load_data(self):
         Feeder = import_class(self.arg.feeder)
         self.data_loader = dict()
+        worker_options = {}
+        if self.arg.num_worker > 0:
+            worker_options = {
+                'prefetch_factor': self.arg.prefetch_factor,
+                'persistent_workers': self.arg.persistent_workers,
+            }
         if self.arg.phase == 'train':
             self.data_loader['train'] = torch.utils.data.DataLoader(
                 dataset=Feeder(**self.arg.train_feeder_args),
                 batch_size=self.arg.batch_size,
                 shuffle=True,
                 pin_memory=True,
-                prefetch_factor=16,
                 num_workers=self.arg.num_worker,
                 drop_last=True,
-                worker_init_fn=init_seed)
+                worker_init_fn=init_seed,
+                **worker_options)
         self.data_loader['test'] = torch.utils.data.DataLoader(
             dataset=Feeder(**self.arg.test_feeder_args),
             batch_size=self.arg.test_batch_size,
             shuffle=False,
+            pin_memory=True,
             num_workers=self.arg.num_worker,
             drop_last=False,
-            worker_init_fn=init_seed)
+            worker_init_fn=init_seed,
+            **worker_options)
 
     def load_model(self):
         output_device = self.arg.device[0] if type(self.arg.device) is list else self.arg.device
@@ -595,17 +623,18 @@ class Processor():
         loader = self.data_loader['train']
         self.adjust_learning_rate(epoch)
 
-        loss_value = []
-        loss_value2 = []
-        acc_value = []
+        device = torch.device('cuda', self.output_device)
+        metric_sum = torch.zeros(3, device=device, dtype=torch.float32)
+        window_sum = torch.zeros_like(metric_sum)
+        window_count = 0
+        batch_count = 0
+        sample_count = 0
         self.train_writer.add_scalar('epoch', epoch, self.global_step)
-        self.record_time()
-        timer = dict(dataloader=0.001, model=0.001, statistics=0.001)
+        torch.cuda.synchronize(self.output_device)
+        torch.cuda.reset_peak_memory_stats(self.output_device)
+        epoch_started = time.perf_counter()
         process = tqdm(loader, ncols=40)
-
-        # mix_precision is slower for this model!!!
-        use_amp = False #True
-        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+        use_amp = self.arg.precision == 'bf16'
         # torch.autograd.set_detect_anomaly(True)
 
         # texts = classes # n_cls 77
@@ -614,10 +643,9 @@ class Processor():
         for batch_idx, (data, label, index) in enumerate(process):
             self.global_step += 1
             with torch.no_grad():
-                data = data.float().cuda(self.output_device)
+                data = data.to(device=device, dtype=torch.float32, non_blocking=True)
                 # data = data.double().cuda(self.output_device)
-                label = label.long().cuda(self.output_device)
-            timer['dataloader'] += self.split_time()
+                label = label.to(device=device, dtype=torch.long, non_blocking=True)
             
             # if (batch_idx + 1) == 1 or (batch_idx + 1) % 10 == 0:
             #     self.lr_scheduler.step(epoch + batch_idx / len(process)) #for warm_cosine_annealing_lr
@@ -627,19 +655,9 @@ class Processor():
             # with autograd.detect_anomaly():
             # forward
 
-            class SoftTargetCrossEntropy(nn.Module):
-
-                def __init__(self):
-                    super(SoftTargetCrossEntropy, self).__init__()
-
-                def forward(self, x, target):
-                    # because p has already been passed through softmax !
-                    # cross entropy is non-symetric!! the order matters!!!
-                    loss = -torch.sum(target * torch.log(x+1e-20), dim=-1)
-                    return loss.mean()
             # print(label)
             
-            with torch.cuda.amp.autocast(enabled=use_amp):
+            with torch.cuda.amp.autocast(enabled=use_amp, dtype=torch.bfloat16):
                 # output, z = self.model(data, F.one_hot(label, num_classes=self.model.module.num_class))
                 # texts = texts.to('cuda')
                 # label = label.to('cuda')
@@ -675,35 +693,43 @@ class Processor():
 
 
             # backward
-            self.optimizer.zero_grad()
-            scaler.scale(loss).backward()
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
             # nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-            scaler.step(self.optimizer)
-            scaler.update()
+            self.optimizer.step()
 
-            loss_value.append(loss.data.item())
-            loss_value2.append(loss2.data.item())
-            timer['model'] += self.split_time()
-
-            value, predict_label = torch.max(output.data, 1)
-            acc = torch.mean((predict_label == label.data).float())
-            acc_value.append(acc.data.item())
-            self.train_writer.add_scalar('acc', acc, self.global_step)
-            self.train_writer.add_scalar('loss', loss.data.item(), self.global_step)
-            self.train_writer.add_scalar('loss2', loss2.data.item(), self.global_step)
-            # statistics
+            predict_label = output.detach().argmax(dim=1)
+            acc = (predict_label == label).float().mean()
+            metrics = torch.stack((loss.detach().float(), loss2.detach().float(), acc))
+            metric_sum += metrics
+            window_sum += metrics
+            window_count += 1
+            batch_count += 1
+            sample_count += data.shape[0]
             self.lr = self.optimizer.param_groups[0]['lr']
-            self.train_writer.add_scalar('lr', self.lr, self.global_step)
-            timer['statistics'] += self.split_time()
+            if window_count == self.arg.log_interval or batch_idx + 1 == len(loader):
+                window_values = (window_sum / window_count).cpu().tolist()
+                if not np.isfinite(window_values).all():
+                    raise RuntimeError('Non-finite training metrics; retry with --precision fp32 --tf32 false')
+                self.train_writer.add_scalar('loss', window_values[0], self.global_step)
+                self.train_writer.add_scalar('loss2', window_values[1], self.global_step)
+                self.train_writer.add_scalar('acc', window_values[2], self.global_step)
+                self.train_writer.add_scalar('lr', self.lr, self.global_step)
+                window_sum.zero_()
+                window_count = 0
 
         # statistics of time consumption and loss
-        proportion = {
-            k: '{:02d}%'.format(int(round(v * 100 / sum(timer.values()))))
-            for k, v in timer.items()
-        }
+        torch.cuda.synchronize(self.output_device)
+        elapsed = time.perf_counter() - epoch_started
+        if batch_count == 0:
+            raise RuntimeError('Training loader produced no batches; check batch-size and dataset size')
+        mean_loss, mean_aux, mean_acc = (metric_sum / batch_count).cpu().tolist()
         self.print_log(
-            '\tMean training loss: {:.4f}. loss2: {:.4f}. Mean training acc: {:.2f}%.'.format(np.mean(loss_value), np.mean(loss_value2), np.mean(acc_value)*100))
-        self.print_log('\tTime consumption: [Data]{dataloader}, [Network]{model}'.format(**proportion))
+            '\tMean training loss: {:.4f}. loss2: {:.4f}. Mean training acc: {:.2f}%.'.format(mean_loss, mean_aux, mean_acc * 100))
+        self.print_log('\tTraining: {:.1f} seconds, {:.1f} samples/second (including data loading).'.format(
+            elapsed, sample_count / elapsed if elapsed else 0.0))
+        self.print_log('\tPeak allocated CUDA memory: {:.0f} MiB.'.format(
+            torch.cuda.max_memory_allocated(self.output_device) / 1024 ** 2))
 
         if save_model:
             # state_dict = self.model.state_dict()
@@ -742,9 +768,9 @@ class Processor():
                 if arg.ema:
                     label_list_ema.append(label)
                 with torch.no_grad():
-                    data = data.float().cuda(self.output_device)
+                    data = data.to(device=torch.device('cuda', self.output_device), dtype=torch.float32, non_blocking=True)
                     # data = data.double().cuda(self.output_device)
-                    label = label.long().cuda(self.output_device)
+                    label = label.to(device=torch.device('cuda', self.output_device), dtype=torch.long, non_blocking=True)
                     # output, z = self.model(data, F.one_hot(label, num_classes=self.model.module.num_class))
                     # output, z = self.model(data, F.one_hot(label, num_classes=self.model.num_class))
                     # texts = texts.to('cuda')
@@ -893,6 +919,12 @@ class Processor():
     def start(self):
         if self.arg.phase == 'train':
             self.print_log('Parameters:\n{}\n'.format(str(vars(self.arg))))
+            self.print_log('CUDA: {}; training precision: {}; evaluation tensor dtype: fp32; '
+                           'TF32 matmul: {}, cuDNN: {}; persistent workers: {}; prefetch: {}.'.format(
+                               torch.cuda.get_device_name(self.output_device), self.arg.precision,
+                               torch.backends.cuda.matmul.allow_tf32,
+                               torch.backends.cudnn.allow_tf32,
+                               self.arg.persistent_workers, self.arg.prefetch_factor))
             if not self.arg.resume:
                 self.global_step = self.arg.start_epoch * len(self.data_loader['train'])
             def count_parameters(model):

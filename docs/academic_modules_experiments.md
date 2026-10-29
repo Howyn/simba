@@ -55,3 +55,25 @@ python main.py --config config/nturgbd-cross-subject/joint_ctr_fr_10ep.yaml \
 ```
 
 如果从训练检查点恢复，使用同一组配置和原工作目录调用 `python main.py --config ... --work-dir ... --resume ...`。若需要继续增加总轮数，应通过 `--num-epoch` 显式设置新的总轮数。FR 原型更新当前只支持单 GPU；暂不支持 FR 与模型 EMA 同时启用。
+
+## 4090 训练速度
+
+训练循环合并了逐 batch 的指标同步，使用固定内存和异步数据传输。默认仍使用 FP32，保持原有 batch size、数据处理和训练轮数。每个 epoch 的日志会显示训练耗时、每秒处理的样本数及峰值已分配显存，耗时包括数据加载。
+
+可选使用 BF16 混合精度和 TF32：
+
+```bash
+python tools/smoke_academic_model.py ctr_fr --precision bf16 --tf32
+bash run_experiment.sh ctr_fr --precision bf16 --tf32 true --persistent-workers true --prefetch-factor 2
+```
+
+先在同一台 GPU 上用真实训练数据测量短时吞吐；每次测量都创建独立的临时模型，不写训练权重或实验日志：
+
+```bash
+python tools/benchmark_4090.py ctr_fr --precision fp32 --tf32 false
+python tools/benchmark_4090.py ctr_fr --precision bf16 --tf32 true
+```
+
+两次测量都使用相同配置的 batch size，不读取测试集，输出热身后的样本/秒和峰值显存。测量结果受其他任务、数据加载和 GPU 负载影响；建议先确保 GPU 空闲并多测一次。若 BF16 无法运行、出现非有限数值或实际更慢，改用 `--precision fp32 --tf32 false` 并保留数据传输、日志同步优化。评估使用 FP32 张量，但如果开启 `--tf32 true`，部分矩阵乘法和卷积的内部计算精度仍可能变化。
+
+启用 BF16、TF32 或持久化数据加载进程可能改变数值或随机数据增强序列。正式消融时，四组应使用同样的精度、TF32、worker、batch size 和数据设置，并在 4090 上重新跑基线。暂不自动增大 batch size：较大 batch 会改变 BN、FR 原型统计及优化步数，需要单独实验。多 worker 时 `--prefetch-factor` 控制每个 worker 预取的 batch 数；大数据集和较多 worker 会增加主机内存占用，视服务器实际资源调整。
