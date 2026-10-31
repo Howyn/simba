@@ -87,6 +87,8 @@ Replace path_to_model_weights argument to the saved model weights you obtain aft
 
 The optional `ssm_bidir`, `ssm_motion`, and `ssm_bidir_motion` modes add shared-encoder bidirectional state scans and/or motion-conditioned delta inside Mamba. See [the AutoDL 10-epoch experiment guide](docs/ssm_experiments.md) for GPU checks, ablations, and commands. Existing baseline configurations retain the original Mamba path.
 
+For the budget-limited 20-epoch comparison, including detached background runs, checkpoint recovery, live logs, and a four-group result summary, see [the 20-epoch experiment guide](docs/ssm_full_experiments.md). Run the baseline and combined model first with `bash run_full_experiments.sh start --modes baseline ssm_bidir_motion`.
+
 ### Training
 
 ```

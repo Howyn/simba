@@ -32,6 +32,7 @@ from utils.NCELoss import NCELoss, LabelSmoothingCrossEntropy
 # from torchlight import DictAction
 import resource
 import copy
+import tempfile
 from torch import linalg as LA
 # import torch.multiprocessing
 # torch.multiprocessing.set_sharing_strategy('file_system')
@@ -98,14 +99,26 @@ def epoch_saving(epoch, model, optimizer, filename, *, global_step=None,
                  best_accuracy=None, best_epoch=None):
     state_dict = model.state_dict()
     weights = OrderedDict([[k.split('module.')[-1], v.cpu()] for k, v in state_dict.items()])
-    torch.save({
+    checkpoint = {
                     'epoch': epoch,
                     'model_state_dict': weights,
                     'optimizer_state_dict': optimizer.state_dict(),
                     'global_step': global_step,
                     'best_accuracy': best_accuracy,
                     'best_epoch': best_epoch,
-                    }, filename) #just change to your preferred folder/filename
+                    }
+    # A failed write must not destroy the preceding good checkpoint.
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=os.path.basename(filename) + '.', suffix='.tmp',
+        dir=os.path.dirname(os.path.abspath(filename)),
+    )
+    os.close(descriptor)
+    try:
+        torch.save(checkpoint, temporary)
+        os.replace(temporary, filename)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
     
 def epoch_saving_2(epoch, model, optimizer, lr_scheduler, filename):
     state_dict = model.state_dict()
@@ -302,6 +315,8 @@ def get_parser():
         default=0.1,
         help='decay rate for learning rate')
     parser.add_argument('--warm_up_epoch', type=int, default=0)
+    parser.add_argument('--save-latest', type=str2bool, default=False,
+                        help='atomically save runs-latest.pt after each evaluated epoch for recovery')
 
     return parser
 
@@ -363,11 +378,15 @@ class Processor():
         self.lr = self.arg.base_lr
         self.best_acc = -1
         self.best_acc_epoch = 0
+        if getattr(self, '_resume_best_accuracy', None) is not None:
+            self.best_acc = self._resume_best_accuracy
+            self.best_acc_epoch = self._resume_best_epoch
         best_path = os.path.join(self.arg.work_dir, 'runs-best.pt')
         if self.arg.resume and os.path.isfile(best_path):
             best_checkpoint = torch.load(best_path, map_location='cpu')
             if (best_checkpoint.get('best_accuracy') is not None
-                    and best_checkpoint.get('epoch', -1) < self.arg.start_epoch):
+                    and best_checkpoint.get('epoch', -1) < self.arg.start_epoch
+                    and best_checkpoint['best_accuracy'] > self.best_acc):
                 self.best_acc = best_checkpoint['best_accuracy']
                 self.best_acc_epoch = best_checkpoint['best_epoch']
 
@@ -490,6 +509,8 @@ class Processor():
             self.arg.start_epoch = checkpoint['epoch'] + 1
             if checkpoint.get('global_step') is not None:
                 self.global_step = checkpoint['global_step']
+            self._resume_best_accuracy = checkpoint.get('best_accuracy')
+            self._resume_best_epoch = checkpoint.get('best_epoch')
             try:
                 self.model.load_state_dict(weights)
             except:
@@ -930,6 +951,10 @@ class Processor():
             def count_parameters(model):
                 return sum(p.numel() for p in model.parameters() if p.requires_grad)
             self.print_log(f'# Parameters: {count_parameters(self.model)}')
+            self.print_log('Learning rate: manual warmup {} epochs, base {}, '
+                           'step {}, decay {}.'.format(
+                               self.arg.warm_up_epoch, self.arg.base_lr,
+                               self.arg.step, self.arg.lr_decay_rate))
             for epoch in range(self.arg.start_epoch, self.arg.num_epoch):
                 # Always save the final epoch so short smoke runs (for example,
                 # num_epoch=1 with the default save_epoch=10) still produce a
@@ -948,6 +973,13 @@ class Processor():
                     # The best epoch need not coincide with a periodic save.
                     epoch_saving(epoch, self.model, self.optimizer,
                                  self.arg.model_saved_name + '-best.pt',
+                                 global_step=int(self.global_step),
+                                 best_accuracy=self.best_acc,
+                                 best_epoch=self.best_acc_epoch)
+
+                if self.arg.save_latest:
+                    epoch_saving(epoch, self.model, self.optimizer,
+                                 self.arg.model_saved_name + '-latest.pt',
                                  global_step=int(self.global_step),
                                  best_accuracy=self.best_acc,
                                  best_epoch=self.best_acc_epoch)
