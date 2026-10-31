@@ -450,11 +450,11 @@ class unit_vit(nn.Module):
         return x
 
 class TCN_ViT_unit(nn.Module):
-    def __init__(self, in_channels, out_channels, A, stride=1, num_of_heads=6, residual=True, kernel_size=5, dilations=[1,2], pe=False, num_point=25, layer=0, use_ctr=False):
+    def __init__(self, in_channels, out_channels, A, stride=1, num_of_heads=6, residual=True, kernel_size=5, dilations=[1,2], pe=False, num_point=25, layer=0, use_ctr=False, ssm_args=None):
         super(TCN_ViT_unit, self).__init__()
         # Flattened joint/channel features are fed to Mamba.  500 only
         # matches UCLA's 20 joints x 25 channels; NTU uses 25 joints.
-        self.mamba = MambaBlock(embed_dim=num_point * 25)
+        self.mamba = MambaBlock(embed_dim=num_point * 25, **(ssm_args or {}))
         # self.mamba_2 = MambaBlock(embed_dim=512)
         self.shift_gcn = (CTRGCUnit(in_channels, out_channels, A) if use_ctr
                           else Shift_gcn(in_channels, out_channels, A))
@@ -639,7 +639,10 @@ class Model(nn.Module):
     def __init__(self, num_class=400, num_point=18, num_person=2, graph=None, graph_args=dict(), in_channels=3,
                  drop_out=0, num_of_heads=9, joint_label=[], ctr_layers=None,
                  fr_layers=None, fr_layer_weights=None, fr_loss_weight=0.1,
-                 fr_hidden_channels=256, fr_input_frames=64, **kwargs):
+                 fr_hidden_channels=256, fr_input_frames=64,
+                 ssm_bidir_layers=None, ssm_motion_layers=None,
+                 ssm_motion_rank=16, ssm_motion_scale=0.1, ssm_bidir_init=0.1,
+                 **kwargs):
         super(Model, self).__init__()
 
         if graph is None:
@@ -662,19 +665,35 @@ class Model(nn.Module):
                for layer in ctr_layers) or len(set(ctr_layers)) != len(ctr_layers):
             raise ValueError("ctr_layers must contain unique layer numbers from 1 to 10")
 
+        def validate_ssm_layers(values, name):
+            values = tuple(values) if values is not None else ()
+            if any(not isinstance(value, int) or isinstance(value, bool) or value not in range(1, 11)
+                   for value in values) or len(set(values)) != len(values):
+                raise ValueError(name + ' must contain unique layer numbers from 1 to 10')
+            return values
 
-        self.l1 = TCN_ViT_unit(3, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=1, use_ctr=1 in ctr_layers)
+        self.ssm_bidir_layers = validate_ssm_layers(ssm_bidir_layers, 'ssm_bidir_layers')
+        self.ssm_motion_layers = validate_ssm_layers(ssm_motion_layers, 'ssm_motion_layers')
+
+        def ssm_args_for(layer):
+            return dict(bidirectional=layer in self.ssm_bidir_layers,
+                        motion_delta=layer in self.ssm_motion_layers,
+                        motion_rank=ssm_motion_rank, motion_scale=ssm_motion_scale,
+                        bidir_init=ssm_bidir_init)
+
+
+        self.l1 = TCN_ViT_unit(3, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=1, use_ctr=1 in ctr_layers, ssm_args=ssm_args_for(1))
         # * num_heads, effect of concatenation following the official implementation
-        self.l2 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=2, use_ctr=2 in ctr_layers)
-        self.l3 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=3, use_ctr=3 in ctr_layers)
-        self.l4 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=4, use_ctr=4 in ctr_layers)
-        self.l5 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=5, use_ctr=5 in ctr_layers)
-        self.l6 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=6, use_ctr=6 in ctr_layers)
-        self.l7 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=7, use_ctr=7 in ctr_layers)
+        self.l2 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=2, use_ctr=2 in ctr_layers, ssm_args=ssm_args_for(2))
+        self.l3 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=3, use_ctr=3 in ctr_layers, ssm_args=ssm_args_for(3))
+        self.l4 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=4, use_ctr=4 in ctr_layers, ssm_args=ssm_args_for(4))
+        self.l5 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=5, use_ctr=5 in ctr_layers, ssm_args=ssm_args_for(5))
+        self.l6 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=6, use_ctr=6 in ctr_layers, ssm_args=ssm_args_for(6))
+        self.l7 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=7, use_ctr=7 in ctr_layers, ssm_args=ssm_args_for(7))
         # self.l8 = TCN_ViT_unit(24 * num_of_heads, 24 * num_of_heads, A, num_of_heads=num_of_heads)
-        self.l8 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=8, use_ctr=8 in ctr_layers)
-        self.l9 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9, use_ctr=9 in ctr_layers)
-        self.l10 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=10, use_ctr=10 in ctr_layers)
+        self.l8 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=8, use_ctr=8 in ctr_layers, ssm_args=ssm_args_for(8))
+        self.l9 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9, use_ctr=9 in ctr_layers, ssm_args=ssm_args_for(9))
+        self.l10 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=10, use_ctr=10 in ctr_layers, ssm_args=ssm_args_for(10))
         # self.l11 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9)
         # self.l12 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9)
 

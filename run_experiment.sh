@@ -3,8 +3,8 @@ set -euo pipefail
 
 mode="${1:-}"
 case "$mode" in
-  baseline|ctr|fr|ctr_fr) ;;
-  *) echo "Usage: bash run_experiment.sh {baseline|ctr|fr|ctr_fr} [main.py options]" >&2; exit 2 ;;
+  baseline|ctr|fr|ctr_fr|ssm_bidir|ssm_motion|ssm_bidir_motion) ;;
+  *) echo "Usage: bash run_experiment.sh {baseline|ctr|fr|ctr_fr|ssm_bidir|ssm_motion|ssm_bidir_motion} [main.py options]" >&2; exit 2 ;;
 esac
 shift
 config="config/nturgbd-cross-subject/joint_${mode}_10ep.yaml"

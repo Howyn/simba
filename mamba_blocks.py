@@ -14,10 +14,22 @@ from mamba_ssm.ops.triton.layernorm import RMSNorm
 # from performer_pytorch.performer_pytorch import FixedPositionalEmbedding
 
 class MambaBlock(nn.Module):
-    def __init__(self, embed_dim, dropout_level=0):
+    def __init__(self, embed_dim, dropout_level=0, bidirectional=False,
+                 motion_delta=False, motion_rank=16, motion_scale=0.1,
+                 bidir_init=0.1):
         super().__init__()
 
-        self.mamba =  Mamba(d_model=embed_dim, d_state=16, d_conv=4, expand=2)
+        if bidirectional or motion_delta:
+            from mamba_ssm.modules.mamba_skeleton import SkeletonMamba
+            self.mamba = SkeletonMamba(
+                d_model=embed_dim, d_state=16, d_conv=4, expand=2,
+                bidirectional=bidirectional, motion_delta=motion_delta,
+                motion_rank=motion_rank, motion_scale=motion_scale,
+                bidir_init=bidir_init,
+            )
+        else:
+            # Keep the existing baseline implementation, state keys and RNG.
+            self.mamba = Mamba(d_model=embed_dim, d_state=16, d_conv=4, expand=2)
         self.norm = RMSNorm(embed_dim) #nn.LayerNorm(embed_dim)
         self.dropout = nn.Dropout(dropout_level)
 

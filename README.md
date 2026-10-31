@@ -83,6 +83,10 @@ bash evaluate.sh
 Replace path_to_model_weights argument to the saved model weights you obtain after training.
 # Training & Testing
 
+### Internal SSM experiments (NTU60 X-Sub Joint)
+
+The optional `ssm_bidir`, `ssm_motion`, and `ssm_bidir_motion` modes add shared-encoder bidirectional state scans and/or motion-conditioned delta inside Mamba. See [the AutoDL 10-epoch experiment guide](docs/ssm_experiments.md) for GPU checks, ablations, and commands. Existing baseline configurations retain the original Mamba path.
+
 ### Training
 
 ```

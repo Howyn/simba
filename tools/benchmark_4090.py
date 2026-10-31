@@ -56,7 +56,8 @@ def nonnegative_int(text):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('baseline', 'ctr', 'fr', 'ctr_fr'))
+    parser.add_argument('mode', choices=('baseline', 'ctr', 'fr', 'ctr_fr',
+                                        'ssm_bidir', 'ssm_motion', 'ssm_bidir_motion'))
     parser.add_argument('--precision', choices=('fp32', 'bf16'), default='fp32')
     parser.add_argument('--tf32', choices=('true', 'false'), default='false')
     parser.add_argument('--device', default='cuda:0')
