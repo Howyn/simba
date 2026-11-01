@@ -322,6 +322,8 @@ def get_parser():
     parser.add_argument('--warm_up_epoch', type=int, default=0)
     parser.add_argument('--save-latest', type=str2bool, default=False,
                         help='atomically save runs-latest.pt after each evaluated epoch for recovery')
+    parser.add_argument('--ssm-protect-addons', type=str2bool, default=False,
+                        help='exclude only new SSM direction/motion parameters from SGD weight decay')
 
     return parser
 
@@ -337,6 +339,8 @@ class Processor():
             raise ValueError('log-interval must be at least 1')
         if arg.num_worker < 0 or arg.prefetch_factor < 1:
             raise ValueError('num-worker must be non-negative and prefetch-factor positive')
+        if arg.ssm_protect_addons and arg.optimizer != 'SGD':
+            raise ValueError('ssm-protect-addons is currently supported with SGD only')
         if arg.tf32 is not None:
             torch.backends.cuda.matmul.allow_tf32 = arg.tf32
             torch.backends.cudnn.allow_tf32 = arg.tf32
@@ -537,8 +541,17 @@ class Processor():
             # params = [i[1] for i in params]
             # base_params = [i[1] for i in base_params]
 
+            parameters = self.model.parameters()
+            if self.arg.ssm_protect_addons:
+                from tools.ssm_optimizer import optimizer_parameter_groups
+                parameters = optimizer_parameter_groups(
+                    self.model, self.arg.weight_decay, protect_ssm_addons=True)
+                for group in parameters:
+                    self.print_log('Optimizer group {}: {} parameters, weight decay {}.'.format(
+                        group['group_name'], sum(p.numel() for p in group['params']),
+                        group['weight_decay']))
             self.optimizer = optim.SGD(
-                self.model.parameters(),
+                parameters,
                 lr=self.arg.base_lr,
                 momentum=self.arg.momentum,
                 nesterov=self.arg.nesterov,
@@ -566,6 +579,11 @@ class Processor():
         
         if self.arg.resume:
             checkpoint = torch.load(self.arg.resume, map_location=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"))
+            saved_groups = checkpoint['optimizer_state_dict']['param_groups']
+            if len(saved_groups) != len(self.optimizer.param_groups):
+                raise ValueError('Optimizer groups differ from the checkpoint. '
+                                 'Do not resume an old unprotected run with ssm-protect-addons enabled; '
+                                 'use a separate directory and a fresh run for that comparison.')
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             self.print_log('Loaded optimizer from epoch: {} !'.format(self.arg.start_epoch -1))
 
