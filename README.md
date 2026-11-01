@@ -89,6 +89,8 @@ The optional `ssm_bidir`, `ssm_motion`, and `ssm_bidir_motion` modes add shared-
 
 For the budget-limited 20-epoch comparison, including detached background runs, checkpoint recovery, live logs, and a four-group result summary, see [the 20-epoch experiment guide](docs/ssm_full_experiments.md). Run the baseline and combined model first with `bash run_full_experiments.sh start --modes baseline ssm_bidir_motion`.
 
+For the single-candidate 10-epoch B/C normalization trial, see [the B/C Norm guide](docs/bc_norm_10ep.md). After the CUDA checks, use `bash run_bc_experiment.sh start`; `results` compares against only the first 10 epochs of the existing baseline run.
+
 ### Training
 
 ```

@@ -642,6 +642,8 @@ class Model(nn.Module):
                  fr_hidden_channels=256, fr_input_frames=64,
                  ssm_bidir_layers=None, ssm_motion_layers=None,
                  ssm_motion_rank=16, ssm_motion_scale=0.1, ssm_bidir_init=0.1,
+                 ssm_bc_norm_layers=None, ssm_bc_norm_gain=0.1,
+                 ssm_bc_norm_bias=0.1, ssm_bc_norm_eps=1e-6,
                  **kwargs):
         super(Model, self).__init__()
 
@@ -674,12 +676,16 @@ class Model(nn.Module):
 
         self.ssm_bidir_layers = validate_ssm_layers(ssm_bidir_layers, 'ssm_bidir_layers')
         self.ssm_motion_layers = validate_ssm_layers(ssm_motion_layers, 'ssm_motion_layers')
+        self.ssm_bc_norm_layers = validate_ssm_layers(ssm_bc_norm_layers, 'ssm_bc_norm_layers')
 
         def ssm_args_for(layer):
             return dict(bidirectional=layer in self.ssm_bidir_layers,
                         motion_delta=layer in self.ssm_motion_layers,
                         motion_rank=ssm_motion_rank, motion_scale=ssm_motion_scale,
-                        bidir_init=ssm_bidir_init)
+                        bidir_init=ssm_bidir_init,
+                        bc_norm=layer in self.ssm_bc_norm_layers,
+                        bc_norm_gain=ssm_bc_norm_gain, bc_norm_bias=ssm_bc_norm_bias,
+                        bc_norm_eps=ssm_bc_norm_eps)
 
 
         self.l1 = TCN_ViT_unit(3, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=1, use_ctr=1 in ctr_layers, ssm_args=ssm_args_for(1))

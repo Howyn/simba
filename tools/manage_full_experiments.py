@@ -1,4 +1,4 @@
-"""Run and inspect sequential 20-epoch experiments on AutoDL Linux.
+"""Run and inspect detached experiment suites on AutoDL Linux.
 
 Only the standard library is imported. Read-only commands never create files.
 The launcher uses the current Python environment and a detached session.
@@ -18,9 +18,26 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SUITE = 'ssm20'
 MODES = ('baseline', 'ssm_bidir', 'ssm_motion', 'ssm_bidir_motion')
 EPOCHS = 20
 QUEUE_REL = Path('work_dir/ntu60/xsub/ssm_full_20ep_queue')
+
+
+def configure_suite(name):
+    """Select a profile before building CLI choices or spawning the worker."""
+    global SUITE, MODES, EPOCHS, QUEUE_REL
+    if name == 'bc10':
+        MODES = ('ssm_bc_norm',)
+        EPOCHS = 10
+        QUEUE_REL = Path('work_dir/ntu60/xsub/ssm_bc_norm_10ep_queue')
+    elif name == 'ssm20':
+        MODES = ('baseline', 'ssm_bidir', 'ssm_motion', 'ssm_bidir_motion')
+        EPOCHS = 20
+        QUEUE_REL = Path('work_dir/ntu60/xsub/ssm_full_20ep_queue')
+    else:
+        raise ValueError(f'Unknown experiment suite: {name}')
+    SUITE = name
 
 
 def group_dir(root, mode):
@@ -79,9 +96,11 @@ def training_processes(root):
 
 def check_sources(root):
     """Catch an old Model that silently swallows new SSM keys through **kwargs."""
-    expected = ((root / 'model/Hyperformer.py', 'Model', 'ssm_bidir_layers'),
+    model_argument = 'ssm_bc_norm_layers' if SUITE == 'bc10' else 'ssm_bidir_layers'
+    block_argument = 'bc_norm' if SUITE == 'bc10' else 'bidirectional'
+    expected = ((root / 'model/Hyperformer.py', 'Model', model_argument),
                 (root / 'model/Hyperformer.py', 'TCN_ViT_unit', 'ssm_args'),
-                (root / 'mamba_blocks.py', 'MambaBlock', 'bidirectional'))
+                (root / 'mamba_blocks.py', 'MambaBlock', block_argument))
     for path, class_name, argument in expected:
         tree = ast.parse(path.read_text(encoding='utf-8-sig'))
         classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
@@ -96,12 +115,23 @@ def check_sources(root):
                and isinstance(node.args[0], ast.Constant)
                and node.args[0].value == '--save-latest' for node in ast.walk(training)):
         raise RuntimeError('Outdated main.py: --save-latest is missing; synchronize the training code first.')
+    if SUITE == 'bc10' and not any(
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'add_argument' and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == '--ssm-protect-addons' for node in ast.walk(training)):
+        raise RuntimeError('Outdated main.py: --ssm-protect-addons is missing; synchronize the training code first.')
     for mode in MODES:
         if not config_path(root, mode).is_file():
             raise RuntimeError(f'Missing configuration: {config_path(root, mode)}')
 
 
-def parse_result(directory):
+def parse_result(directory, epoch_limit=None):
+    """Read metrics; an explicit limit treats only that training prefix as reference.
+
+    Prefix summaries deliberately ignore the final run's best-accuracy/checkpoint
+    metadata, which can describe a later epoch outside the comparison budget.
+    """
     log = directory / 'log.txt'
     result = dict(mode=directory.name, trained_epoch=0, eval_epoch=0,
                   best_top1=None, best_epoch=None, last_top1=None,
@@ -117,26 +147,30 @@ def parse_result(directory):
             eval_epoch = int(match[1])
             result['eval_epoch'] = max(result['eval_epoch'], eval_epoch)
         if match := re.search(r'Top1:\s*([\d.]+)%', line):
-            if eval_epoch is not None:
+            if eval_epoch is not None and (epoch_limit is None or eval_epoch <= epoch_limit):
                 scores[eval_epoch] = float(match[1])
         if match := re.search(r'Top5:\s*([\d.]+)%', line):
-            if eval_epoch is not None:
+            if eval_epoch is not None and (epoch_limit is None or eval_epoch <= epoch_limit):
                 top5[eval_epoch] = float(match[1])
-        if match := re.search(r'Best accuracy:\s*([\d.eE+-]+)', line):
+        if (match := re.search(r'Best accuracy:\s*([\d.eE+-]+)', line)) and epoch_limit is None:
             final_best = float(match[1]) * 100
-        if match := re.search(r'Epoch number:\s*(\d+)', line):
+        if (match := re.search(r'Epoch number:\s*(\d+)', line)) and epoch_limit is None:
             result['best_epoch'] = int(match[1])
     if scores:
         best_epoch = max(scores, key=scores.get)
         result['best_top1'] = scores[best_epoch]
         result['best_epoch'] = result['best_epoch'] or best_epoch
         result['last_top1'] = scores[max(scores)]
-        result['final_top1'] = scores.get(EPOCHS)
+        result['final_top1'] = scores.get(EPOCHS if epoch_limit is None else epoch_limit)
         result['best_top5'] = top5.get(result['best_epoch'])
     if final_best is not None:
         result['best_top1'] = final_best
     result['finished'] = (final_best is not None and result['trained_epoch'] >= EPOCHS
                           and (directory / 'runs-best.pt').is_file())
+    if epoch_limit is not None:
+        result['trained_epoch'] = min(result['trained_epoch'], epoch_limit)
+        result['eval_epoch'] = min(result['eval_epoch'], epoch_limit)
+        result['finished'] = epoch_limit in scores
     return result
 
 
@@ -153,7 +187,8 @@ def plan_mode(root, mode):
     return 'new', None
 
 
-def preflight(root, modes=MODES):
+def preflight(root, modes=None):
+    modes = MODES if modes is None else modes
     check_sources(root)
     busy = training_processes(root)
     if busy:
@@ -181,13 +216,15 @@ def detached_process(command, root, output, lock_fd):
                             start_new_session=True, pass_fds=(lock_fd,))
 
 
-def start_queue(root, queue, modes=MODES):
+def start_queue(root, queue, modes=None):
+    modes = MODES if modes is None else modes
     if os.name != 'posix' or not Path('/proc').is_dir():
         raise RuntimeError('Start the queue on AutoDL Linux using the existing training Python environment.')
     with lock_queue(queue) as handle:
         preflight(root, modes)
-        write_state(queue, status='starting', current_mode=None, modes=list(modes))
-        command = [sys.executable, str(Path(__file__).resolve()), 'run', '--lock-fd', str(handle.fileno()),
+        write_state(queue, status='starting', current_mode=None, modes=list(modes), suite=SUITE)
+        command = [sys.executable, str(Path(__file__).resolve()), '--suite', SUITE,
+                   'run', '--lock-fd', str(handle.fileno()),
                    '--modes', *modes]
         with (queue / 'runner.log').open('a', buffering=1, encoding='utf-8') as output:
             process = detached_process(command, root, output, handle.fileno())
@@ -197,12 +234,13 @@ def start_queue(root, queue, modes=MODES):
           'a stopped/restarted cloud instance requires starting the queue again.')
 
 
-def run_modes(root, queue, modes=MODES, spawn=None):
+def run_modes(root, queue, modes=None, spawn=None):
     """Core queue logic; injected subprocesses allow CPU-only behavioral tests."""
+    modes = MODES if modes is None else modes
     spawn = spawn or subprocess.Popen
     pid = os.getpid()
     state = dict(status='running', manager_pid=pid, manager_start=process_start(pid),
-                 current_mode=None, training_pid=None, modes=list(modes))
+                 current_mode=None, training_pid=None, modes=list(modes), suite=SUITE)
     write_state(queue, **state)
     for mode in modes:
         action, checkpoint = plan_mode(root, mode)
@@ -257,7 +295,7 @@ def run_modes(root, queue, modes=MODES, spawn=None):
     return 0
 
 
-def run_queue(root, queue, lock_fd, modes=MODES):
+def run_queue(root, queue, lock_fd, modes=None):
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     handle = os.fdopen(lock_fd, 'a') if lock_fd is not None else lock_queue(queue)
     with handle:
@@ -275,6 +313,14 @@ def run_queue(root, queue, lock_fd, modes=MODES):
 
 def print_results(root):
     print(f'mode\tstatus\ttrained_epoch\tbest_top1_%\tbest_epoch\tbest_top5_%\tepoch{EPOCHS}_top1_%')
+    reference = None
+    if SUITE == 'bc10':
+        reference = parse_result(root / 'work_dir/ntu60/xsub/full_baseline_20ep', epoch_limit=10)
+        values = ['baseline_first10', 'reference' if reference['finished'] else 'reference_incomplete',
+                  reference['trained_epoch'], reference['best_top1'], reference['best_epoch'],
+                  reference['best_top5'], reference['final_top1']]
+        print('\t'.join('-' if value is None else f'{value:.4f}' if isinstance(value, float) else str(value)
+                        for value in values))
     for mode in MODES:
         directory = group_dir(root, mode)
         result = parse_result(directory)
@@ -283,6 +329,13 @@ def print_results(root):
                   result['best_top5'], result['final_top1']]
         print('\t'.join('-' if value is None else f'{value:.4f}' if isinstance(value, float) else str(value)
                         for value in values))
+        if (reference is not None and reference['finished'] and result['finished']
+                and reference['best_top1'] is not None and result['best_top1'] is not None):
+            print(f'{mode} best-vs-baseline-first10: '
+                  f'{result["best_top1"] - reference["best_top1"]:+.4f} percentage points')
+    if SUITE == 'bc10':
+        print('Reference uses only epochs 1-10 from full_baseline_20ep/log.txt; '
+              'later epochs/final summaries and baseline weights are not used.')
 
 
 def show_logs(root, queue, mode, lines, follow):
@@ -322,7 +375,11 @@ def show_logs(root, queue, mode, lines, follow):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    suite_parser = argparse.ArgumentParser(add_help=False)
+    suite_parser.add_argument('--suite', choices=('ssm20', 'bc10'), default='ssm20')
+    suite_args, _ = suite_parser.parse_known_args()
+    configure_suite(suite_args.suite)
+    parser = argparse.ArgumentParser(description=__doc__, parents=[suite_parser])
     commands = parser.add_subparsers(dest='command', required=True)
     start = commands.add_parser('start', help='launch/resume the sequential queue in a detached session')
     start.add_argument('--modes', nargs='+', choices=MODES, default=list(MODES))

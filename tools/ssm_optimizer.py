@@ -1,4 +1,4 @@
-"""Optional optimizer protection for Simba's three SSM add-on parameters.
+"""Optional optimizer protection for Simba's SSM add-on parameters.
 
 The default returns the original parameter iterator. The opt-in path leaves
 all backbone weight decay unchanged, including existing Mamba A_log/D flags.
@@ -7,7 +7,8 @@ all backbone weight decay unchanged, including existing Mamba A_log/D flags.
 import math
 
 
-_ADDON_NAMES = frozenset(('bidir_logit', 'motion_down.weight', 'motion_up.weight'))
+_ADDON_NAMES = frozenset(('bidir_logit', 'motion_down.weight', 'motion_up.weight',
+                          'bc_B_gain', 'bc_C_gain', 'bc_B_bias', 'bc_C_bias'))
 
 
 def optimizer_parameter_groups(model, weight_decay, protect_ssm_addons=False):
@@ -29,8 +30,8 @@ def optimizer_parameter_groups(model, weight_decay, protect_ssm_addons=False):
         destination = addons if marker and leaf in _ADDON_NAMES else backbone
         destination.append(parameter)
     if not addons:
-        raise ValueError('SSM add-on protection requested, but no bidir_logit or '
-                         'motion_down/up weights were found inside *.mamba.mamba')
+        raise ValueError('SSM add-on protection requested, but no bidir_logit, '
+                         'motion_down/up or bc_* parameters were found inside *.mamba.mamba')
 
     groups = []
     if backbone:

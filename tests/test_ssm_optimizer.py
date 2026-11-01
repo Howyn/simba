@@ -128,6 +128,30 @@ class SSMOptimizerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'no bidir_logit'):
             optimizer_parameter_groups(nn.Linear(8, 2), .0004, True)
 
+    def test_bc_norm_only_parameters_are_protected(self):
+        inner = self.model.l4.mamba.mamba
+        for name in ('bidir_logit', 'motion_down', 'motion_up'):
+            delattr(inner, name)
+        names = ('bc_B_gain', 'bc_C_gain', 'bc_B_bias', 'bc_C_bias')
+        for name in names:
+            inner.register_parameter(name, nn.Parameter(torch.full((2,), .1)))
+        # An unrelated similarly named parameter is still part of the backbone.
+        self.model.bc_B_gain = nn.Parameter(torch.full((2,), .1))
+        groups = optimizer_parameter_groups(self.model, .0004, True)
+        no_decay = {id(parameter) for group in groups if group['weight_decay'] == 0
+                    for parameter in group['params']}
+        self.assertEqual(no_decay, {id(getattr(inner, name)) for name in names})
+        self.assertNotIn(id(inner.A_log), no_decay)
+        self.assertNotIn(id(inner.D), no_decay)
+        self.assertNotIn(id(self.model.bc_B_gain), no_decay)
+        initial = [getattr(inner, name).detach().clone() for name in names]
+        optimizer = torch.optim.SGD(groups, lr=.025, momentum=.9, nesterov=True, weight_decay=.0004)
+        for _ in range(16):
+            self.zero_task_gradients(self.model)
+            optimizer.step()
+        for name, expected in zip(names, initial):
+            torch.testing.assert_close(getattr(inner, name), expected, atol=0, rtol=0)
+
     def test_training_entry_point_uses_protected_groups_only_when_enabled(self):
         tree = ast.parse((Path(__file__).resolve().parents[1] / 'main.py').read_text(encoding='utf-8'))
         processor = next(node for node in tree.body

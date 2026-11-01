@@ -323,7 +323,7 @@ def get_parser():
     parser.add_argument('--save-latest', type=str2bool, default=False,
                         help='atomically save runs-latest.pt after each evaluated epoch for recovery')
     parser.add_argument('--ssm-protect-addons', type=str2bool, default=False,
-                        help='exclude only new SSM direction/motion parameters from SGD weight decay')
+                        help='exclude only new SSM direction/motion/B-C normalization parameters from SGD weight decay')
 
     return parser
 

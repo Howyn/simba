@@ -16,16 +16,19 @@ from mamba_ssm.ops.triton.layernorm import RMSNorm
 class MambaBlock(nn.Module):
     def __init__(self, embed_dim, dropout_level=0, bidirectional=False,
                  motion_delta=False, motion_rank=16, motion_scale=0.1,
-                 bidir_init=0.1):
+                 bidir_init=0.1, bc_norm=False, bc_norm_gain=0.1,
+                 bc_norm_bias=0.1, bc_norm_eps=1e-6):
         super().__init__()
 
-        if bidirectional or motion_delta:
+        if bidirectional or motion_delta or bc_norm:
             from mamba_ssm.modules.mamba_skeleton import SkeletonMamba
             self.mamba = SkeletonMamba(
                 d_model=embed_dim, d_state=16, d_conv=4, expand=2,
                 bidirectional=bidirectional, motion_delta=motion_delta,
                 motion_rank=motion_rank, motion_scale=motion_scale,
                 bidir_init=bidir_init,
+                bc_norm=bc_norm, bc_norm_gain=bc_norm_gain,
+                bc_norm_bias=bc_norm_bias, bc_norm_eps=bc_norm_eps,
             )
         else:
             # Keep the existing baseline implementation, state keys and RNG.

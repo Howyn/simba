@@ -24,6 +24,7 @@ def check_ssm_modules(model, config):
         raise RuntimeError('FR-Head unexpectedly enabled for an SSM experiment')
     bidir_layers = set(config['model_args'].get('ssm_bidir_layers', ()))
     motion_layers = set(config['model_args'].get('ssm_motion_layers', ()))
+    bc_layers = set(config['model_args'].get('ssm_bc_norm_layers', ()))
     branches = []
     for layer in range(1, 11):
         block = getattr(model, f'l{layer}')
@@ -35,6 +36,15 @@ def check_ssm_modules(model, config):
         motion_enabled = bool(getattr(inner, 'motion_delta', False))
         if motion_enabled != (layer in motion_layers):
             raise RuntimeError(f'Incorrect motion-delta placement at l{layer}')
+        bc_enabled = bool(getattr(inner, 'bc_norm', False))
+        if bc_enabled != (layer in bc_layers):
+            raise RuntimeError(f'Incorrect B/C normalization placement at l{layer}')
+        if bc_enabled:
+            for name in ('bc_B_gain', 'bc_C_gain', 'bc_B_bias', 'bc_C_bias'):
+                parameter = getattr(inner, name, None)
+                if not isinstance(parameter, torch.nn.Parameter):
+                    raise RuntimeError(f'Missing B/C normalization parameter at l{layer}: {name}')
+                branches.append((f'l{layer} {name}', [parameter]))
         if layer in bidir_layers:
             parameters = [parameter for name, parameter in inner.named_parameters(recurse=False)
                           if 'bidir' in name]
@@ -63,7 +73,7 @@ def check_branch_gradients(branches):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('mode', choices=('baseline', 'ctr', 'fr', 'ctr_fr',
-                                        'ssm_bidir', 'ssm_motion', 'ssm_bidir_motion'))
+                                        'ssm_bidir', 'ssm_motion', 'ssm_bidir_motion', 'ssm_bc_norm'))
     parser.add_argument('--batch-size', type=int, default=2)
     parser.add_argument('--precision', choices=('fp32', 'bf16'), default='fp32')
     parser.add_argument('--tf32', action='store_true')
@@ -81,7 +91,10 @@ def main():
     model = Model(**config['model_args']).cuda()
     branches = check_ssm_modules(model, config) if args.mode.startswith('ssm_') else []
     model.train()
-    optimizer = torch.optim.SGD(model.parameters(), lr=config['base_lr'],
+    from tools.ssm_optimizer import optimizer_parameter_groups
+    parameters = optimizer_parameter_groups(model, config['weight_decay'],
+                                             config.get('ssm_protect_addons', False))
+    optimizer = torch.optim.SGD(parameters, lr=config['base_lr'],
                                 momentum=0.9, weight_decay=config['weight_decay'])
     num_classes = config['model_args']['num_class']
     frames = config['train_feeder_args']['window_size']
