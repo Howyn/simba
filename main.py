@@ -99,13 +99,18 @@ def epoch_saving(epoch, model, optimizer, filename, *, global_step=None,
                  best_accuracy=None, best_epoch=None):
     state_dict = model.state_dict()
     weights = OrderedDict([[k.split('module.')[-1], v.cpu()] for k, v in state_dict.items()])
+    optimizer_state = optimizer.state_dict()
+    # The manual scheduler and dataset accuracy can produce NumPy scalars.
+    # Persist plain metadata so weights_only=True can read future checkpoints.
+    for group in optimizer_state['param_groups']:
+        group['lr'] = float(group['lr'])
     checkpoint = {
-                    'epoch': epoch,
+                    'epoch': int(epoch),
                     'model_state_dict': weights,
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'global_step': global_step,
-                    'best_accuracy': best_accuracy,
-                    'best_epoch': best_epoch,
+                    'optimizer_state_dict': optimizer_state,
+                    'global_step': None if global_step is None else int(global_step),
+                    'best_accuracy': None if best_accuracy is None else float(best_accuracy),
+                    'best_epoch': None if best_epoch is None else int(best_epoch),
                     }
     # A failed write must not destroy the preceding good checkpoint.
     descriptor, temporary = tempfile.mkstemp(

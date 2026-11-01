@@ -6,7 +6,9 @@ rows, despite its name. Matching label sequences assume the same test order.
 import argparse
 from collections import defaultdict
 import csv
+import importlib
 from pathlib import Path
+import pickle
 import sys
 
 
@@ -54,13 +56,54 @@ def compare_predictions(baseline, combined):
                 classes=dict(classes))
 
 
+def load_checkpoint_cpu(path):
+    """Read tensor checkpoints, including legacy NumPy scalar metadata, safely."""
+    import torch
+    try:
+        return torch.load(path, map_location='cpu', weights_only=True)
+    except TypeError:
+        raise ValueError('This PyTorch version does not support safe checkpoint loading; '
+                         'use --skip-checkpoint for prediction-only analysis.') from None
+    except pickle.UnpicklingError as error:
+        if 'numpy' not in str(error).lower():
+            raise ValueError(f'{path}: safe checkpoint loading failed: {error}') from None
+    try:
+        import numpy as np
+    except ImportError:
+        raise ValueError('NumPy is needed to read this older checkpoint metadata; '
+                         'use --skip-checkpoint for prediction-only analysis.') from None
+    if not hasattr(torch.serialization, 'safe_globals'):
+        raise ValueError('This PyTorch version cannot safely read NumPy checkpoint metadata; '
+                         'use --skip-checkpoint for prediction-only analysis.')
+    scalar_module = 'numpy._core.multiarray' if int(np.__version__.split('.')[0]) >= 2 else 'numpy.core.multiarray'
+    scalar = importlib.import_module(scalar_module).scalar
+
+    def scalar_alias(module):
+        # NumPy 2 renamed core to _core. Local wrappers recognize either pickle
+        # path on PyTorch 2.5 as well as newer versions without patching NumPy.
+        def reconstruct(*args):
+            return scalar(*args)
+        reconstruct.__module__ = module
+        reconstruct.__name__ = reconstruct.__qualname__ = 'scalar'
+        return reconstruct
+
+    allowed = [scalar_alias('numpy.core.multiarray'),
+               scalar_alias('numpy._core.multiarray'), np.dtype]
+    allowed.extend(type(np.dtype(name)) for name in ('float64', 'float32', 'int64', 'int32'))
+    existing = torch.serialization.get_safe_globals()
+    allowed = [item for item in allowed if item not in existing]
+    try:
+        with torch.serialization.safe_globals(allowed):
+            return torch.load(path, map_location='cpu', weights_only=True)
+    except pickle.UnpicklingError as error:
+        raise ValueError(f'{path}: safe loading still failed after allowing numeric NumPy metadata: '
+                         f'{error}') from None
+
+
 def checkpoint_stats(path):
     """Lazy torch import: prediction comparison itself needs only stdlib."""
     import torch
-    try:
-        checkpoint = torch.load(path, map_location='cpu', weights_only=True)
-    except TypeError:  # PyTorch versions predating weights_only.
-        checkpoint = torch.load(path, map_location='cpu')
+    checkpoint = load_checkpoint_cpu(path)
     state = checkpoint.get('model_state_dict', checkpoint) if isinstance(checkpoint, dict) else None
     if not isinstance(state, dict):
         raise ValueError(f'{path}: no model_state_dict')

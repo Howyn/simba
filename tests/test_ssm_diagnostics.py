@@ -6,12 +6,18 @@ import math
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
+import zipfile
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'tools/diagnose_ssm_results.py'
 SPEC = importlib.util.spec_from_file_location('ssm_diagnostics', SCRIPT)
 diagnostics = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(diagnostics)
+
+
+class UnsupportedCheckpointMetadata:
+    pass
 
 
 class PredictionDiagnosticsTest(unittest.TestCase):
@@ -103,6 +109,44 @@ class CheckpointDiagnosticsTest(unittest.TestCase):
             self.torch.save({'model_state_dict': state}, path)
             with self.assertRaisesRegex(ValueError, 'non-finite parameter l7'):
                 diagnostics.checkpoint_stats(path)
+
+    def test_real_numpy_metadata_and_both_scalar_module_names(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest('legacy metadata checks need NumPy')
+        with tempfile.TemporaryDirectory() as directory:
+            native = Path(directory) / 'native.pt'
+            self.torch.save({'model_state_dict': self.state(), 'best_accuracy': np.float64(.862),
+                             'best_epoch': np.int64(19),
+                             'optimizer_state_dict': {'param_groups': [{'lr': np.float64(.00025)}]}}, native)
+            # Mirror the NumPy 1/2 GLOBAL-path rename using valid torch archives.
+            for module in (b'numpy.core.multiarray', b'numpy._core.multiarray'):
+                path = Path(directory) / ('legacy.pt' if b'._core' not in module else 'modern.pt')
+                with zipfile.ZipFile(native) as source, zipfile.ZipFile(path, 'w') as target:
+                    for name in source.namelist():
+                        data = source.read(name)
+                        if name.endswith('/data.pkl'):
+                            data = data.replace(b'numpy._core.multiarray\n', module + b'\n')
+                            data = data.replace(b'numpy.core.multiarray\n', module + b'\n')
+                        target.writestr(name, data)
+                with self.torch.serialization.safe_globals([np.dtype]):
+                    before = set(self.torch.serialization.get_safe_globals())
+                    with mock.patch.object(self.torch, 'load', wraps=self.torch.load) as load:
+                        result = diagnostics.checkpoint_stats(path)
+                    self.assertTrue(all(call.kwargs['weights_only'] is True for call in load.call_args_list))
+                    self.assertEqual(set(self.torch.serialization.get_safe_globals()), before)
+                self.assertAlmostEqual(result[0]['gate_mean'], .1, places=6)
+
+    def test_unknown_metadata_is_rejected_without_unsafe_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'unknown.pt'
+            self.torch.save({'model_state_dict': self.state(),
+                             'metadata': UnsupportedCheckpointMetadata()}, path)
+            with mock.patch.object(self.torch, 'load', wraps=self.torch.load) as load:
+                with self.assertRaisesRegex(ValueError, 'safe .*loading'):
+                    diagnostics.checkpoint_stats(path)
+            self.assertTrue(all(call.kwargs['weights_only'] is True for call in load.call_args_list))
 
 
 if __name__ == '__main__':

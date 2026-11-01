@@ -74,6 +74,25 @@ class TrainingCheckpointTest(unittest.TestCase):
             self.assertEqual(checkpoint['best_epoch'], 2)
             self.assertEqual(list(Path(directory).iterdir()), [path])
 
+    def test_numpy_training_metadata_is_saved_as_plain_python_values(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest('real NumPy metadata check needs NumPy')
+        self.optimizer.param_groups[0]['lr'] = np.float64(.00025)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'runs-best.pt'
+            save_epoch(np.int64(18), self.model, self.optimizer, str(path),
+                       global_step=np.int64(47880), best_accuracy=np.float64(.862),
+                       best_epoch=np.int64(19))
+            checkpoint = torch.load(path, map_location='cpu', weights_only=True)
+        self.assertIs(type(checkpoint['epoch']), int)
+        self.assertIs(type(checkpoint['global_step']), int)
+        self.assertIs(type(checkpoint['best_epoch']), int)
+        self.assertIs(type(checkpoint['best_accuracy']), float)
+        self.assertIs(type(checkpoint['optimizer_state_dict']['param_groups'][0]['lr']), float)
+        self.assertIsInstance(self.optimizer.param_groups[0]['lr'], np.float64)
+
 
 if __name__ == '__main__':
     unittest.main()
