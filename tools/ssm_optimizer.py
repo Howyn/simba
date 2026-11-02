@@ -8,7 +8,9 @@ import math
 
 
 _ADDON_NAMES = frozenset(('bidir_logit', 'motion_down.weight', 'motion_up.weight',
-                          'bc_B_gain', 'bc_C_gain', 'bc_B_bias', 'bc_C_bias'))
+                          'bc_B_gain', 'bc_C_gain', 'bc_B_bias', 'bc_C_bias',
+                          'retain_logit', 'write_logit'))
+_SCALE_GAINS = ('dual_scale_logit', 'retain_logit', 'write_logit')
 
 
 def optimizer_parameter_groups(model, weight_decay, protect_ssm_addons=False):
@@ -41,15 +43,15 @@ def optimizer_parameter_groups(model, weight_decay, protect_ssm_addons=False):
 
 
 def algorithm_parameter_groups(model, weight_decay):
-    """Protect only the new dual-scale mixing logit, preserving backbone decay.
+    """Protect the new bounded scale gains, preserving backbone decay.
 
-    A sigmoid mixing bias decaying to zero would drift towards a 50/50 mix
-    even with zero task gradient. No other existing Mamba parameter changes
-    optimizer rules. The baseline still returns its original iterator.
+    A decaying mixing/gain logit would drift away from its published initial
+    value even with zero task gradient. No other existing Mamba parameter
+    changes optimizer rules. The baseline still returns its original iterator.
     """
     regular, gates = [], []
     for name, parameter in model.named_parameters():
-        target = gates if name.endswith('.mamba.mamba.dual_scale_logit') else regular
+        target = gates if any(name.endswith('.' + gain) for gain in _SCALE_GAINS) else regular
         target.append(parameter)
     if not gates:
         return model.parameters()

@@ -14,6 +14,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+CONTEXT_MODES = ('context_write', 'retain_write', 'context_retain_write')
+CONTEXT_PARAM_MARKERS = ('.context_down.', '.context_fuse.', '.context_up.',
+                         '.context_convs.', '.retain_logit', '.write_logit')
+
 
 def assess_signal(rows, gradient_rows, *, initial_parity=True):
     """Engineering execution gate, deliberately independent of accuracy."""
@@ -25,13 +29,23 @@ def assess_signal(rows, gradient_rows, *, initial_parity=True):
         reasons.append('Missing observations at both step 20 and step 40')
     for row in late:
         numeric = ('correction_ratio', 'logit_relative', 'numerical_floor')
+        if 'state_energy_ratio' in row:
+            numeric += ('state_energy_ratio',)
         if any(not math.isfinite(row[name]) for name in numeric):
             reasons.append(f"step {row['step']}: non-finite signal")
             continue
-        if not 1e-4 <= row['correction_ratio'] <= 1.0:
+        # A longer retention time intentionally changes the readout, so rows that
+        # report state energy may show a larger corrected fraction; the state
+        # energy bound below is their runaway guard.
+        upper = 3.0 if 'state_energy_ratio' in row else 1.0
+        if not 1e-4 <= row['correction_ratio'] <= upper:
             reasons.append(f"step {row['step']}: effective correction is too small or dominates the original path")
         if row['logit_relative'] <= max(1e-6, 10 * row['numerical_floor']):
             reasons.append(f"step {row['step']}: logit change does not exceed the numerical noise floor")
+        if 'state_energy_ratio' in row and not 0.1 <= row['state_energy_ratio'] <= 10:
+            # A longer retention time legitimately raises state energy; a tenfold
+            # excursion is a runaway guard, not an accuracy criterion.
+            reasons.append(f"step {row['step']}: state energy ratio {row['state_energy_ratio']:.3f} is outside [0.1, 10]")
         if not row.get('mechanism_ok', False):
             reasons.append(f"step {row['step']}: state mechanism invariant failed")
     if not gradient_rows:
@@ -55,7 +69,7 @@ def atomic_json(path, value):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('joint_state', 'dual_scale'))
+    parser.add_argument('mode', choices=('joint_state', 'dual_scale') + CONTEXT_MODES)
     parser.add_argument('--seed', type=int, default=4321)
     args = parser.parse_args()
     receipt = None
@@ -131,7 +145,9 @@ def main():
                                     nesterov=config['nesterov'], weight_decay=config['weight_decay'])
         targets = {name: parameter for name, parameter in model.named_parameters()
                    if (args.mode == 'joint_state' and '.joint_state.' in name)
-                   or (args.mode == 'dual_scale' and name.endswith('dual_scale_logit'))}
+                   or (args.mode == 'dual_scale' and name.endswith('dual_scale_logit'))
+                   or (args.mode in CONTEXT_MODES
+                       and any(marker in name for marker in CONTEXT_PARAM_MARKERS))}
         if not targets:
             raise RuntimeError('Expected new algorithm parameters were not constructed')
         initial = {name: parameter.detach().clone() for name, parameter in targets.items()}
@@ -160,6 +176,50 @@ def main():
                     mechanism_ok = bool(torch.isfinite(parts['state_readout']).all().item()
                                         and 'D' not in dict(block.joint_state.named_parameters()))
                     extra = {'state_readout_rms': float(parts['state_readout'].float().square().mean().sqrt().item())}
+                elif args.mode in CONTEXT_MODES:
+                    inner = block.mamba
+                    parts = inner.probe_components(features)
+                    ratio = relative(parts['output'] - parts['output_base'], parts['output_base'])
+                    inner.correction_enabled = False
+                    try:
+                        # Explicit scan path with the correction removed.
+                        off, _ = model(fixed_data, onehot_fixed)
+                        inner.correction_enabled = True
+                        # Fused baseline path: both mechanism toggles off.
+                        inner.context_enabled = False
+                        inner.retain_write_enabled = False
+                        original, _ = model(fixed_data, onehot_fixed)
+                    finally:
+                        inner.correction_enabled = True
+                        inner.context_enabled = True
+                        inner.retain_write_enabled = True
+                    floor = relative(off - original, original)
+                    mechanism_ok = True
+                    extra = {'state_energy_ratio': float(parts['state_energy_ratio'].item()),
+                             'context_relative': float(parts['context_relative'])}
+                    if inner.context_write:
+                        context_norm = parts['B_context'].detach().float().norm().item()
+                        base_norm = parts['B_base'].detach().float().norm().item()
+                        mechanism_ok = (mechanism_ok
+                                        and bool(torch.isfinite(parts['B_context']).all().item())
+                                        and 0 < context_norm < 0.5 * base_norm)
+                        extra['context_write_ratio'] = context_norm / max(base_norm, 1e-12)
+                    if inner.retain_write:
+                        retain, write = parts['retain'], parts['write']
+                        retain_ok = bool((retain > inner.retain_floor).all().item()
+                                         and (retain < 1).all().item())
+                        write_ok = bool((write > 0).all().item()
+                                        and (write < inner.write_max).all().item())
+                        power_error = float((parts['retention'] - parts['retention_base'].pow(
+                            retain.double().view(1, -1, 1, 1))).abs().max().item())
+                        scale_error = float((parts['u_write_scale']
+                                             - (write / retain)).abs().max().item())
+                        mechanism_ok = (mechanism_ok and retain_ok and write_ok
+                                        and power_error < 1e-5 and scale_error < 1e-6)
+                        extra.update(retain_mean=float(retain.mean().item()),
+                                     write_mean=float(write.mean().item()),
+                                     retention_power_error=power_error,
+                                     write_scale_error=scale_error)
                 else:
                     inner = block.mamba
                     parts = inner.probe_components(features)

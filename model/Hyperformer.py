@@ -647,6 +647,11 @@ class Model(nn.Module):
                  ssm_joint_state_layers=None, ssm_joint_state_weight=0.1,
                  ssm_dual_scale_layers=None, ssm_slow_scale=0.5,
                  ssm_scale_gate_init=0.1,
+                 ssm_context_layers=None, ssm_retain_layers=None,
+                 ssm_context_rank=16, ssm_context_kernels=(3, 5, 7),
+                 ssm_context_scale=0.1, ssm_retain_init=0.5,
+                 ssm_retain_floor=0.25, ssm_write_init=1.0,
+                 ssm_write_max=2.0,
                  **kwargs):
         super(Model, self).__init__()
 
@@ -682,12 +687,19 @@ class Model(nn.Module):
         self.ssm_bc_norm_layers = validate_ssm_layers(ssm_bc_norm_layers, 'ssm_bc_norm_layers')
         self.ssm_joint_state_layers = validate_ssm_layers(ssm_joint_state_layers, 'ssm_joint_state_layers')
         self.ssm_dual_scale_layers = validate_ssm_layers(ssm_dual_scale_layers, 'ssm_dual_scale_layers')
+        self.ssm_context_layers = validate_ssm_layers(ssm_context_layers, 'ssm_context_layers')
+        self.ssm_retain_layers = validate_ssm_layers(ssm_retain_layers, 'ssm_retain_layers')
         if self.ssm_joint_state_layers and self.ssm_dual_scale_layers:
             raise ValueError('Initial algorithm screening runs one new candidate at a time')
         if (self.ssm_joint_state_layers or self.ssm_dual_scale_layers) and (
                 ctr_layers or fr_layers or self.ssm_bidir_layers or self.ssm_motion_layers
                 or self.ssm_bc_norm_layers):
             raise ValueError('New algorithm screening must disable CTR, FR and earlier SSM variants')
+        if (self.ssm_context_layers or self.ssm_retain_layers) and (
+                ctr_layers or fr_layers or self.ssm_bidir_layers or self.ssm_motion_layers
+                or self.ssm_bc_norm_layers or self.ssm_joint_state_layers
+                or self.ssm_dual_scale_layers):
+            raise ValueError('Context/retain screening must disable CTR, FR and every earlier SSM variant')
 
         def ssm_args_for(layer):
             return dict(bidirectional=layer in self.ssm_bidir_layers,
@@ -700,7 +712,16 @@ class Model(nn.Module):
                         joint_state=layer in self.ssm_joint_state_layers,
                         num_joints=num_point, joint_state_weight=ssm_joint_state_weight,
                         dual_scale=layer in self.ssm_dual_scale_layers,
-                        slow_scale=ssm_slow_scale, scale_gate_init=ssm_scale_gate_init)
+                        slow_scale=ssm_slow_scale, scale_gate_init=ssm_scale_gate_init,
+                        context_write=layer in self.ssm_context_layers,
+                        retain_write=layer in self.ssm_retain_layers,
+                        context_rank=ssm_context_rank,
+                        context_kernels=ssm_context_kernels,
+                        context_scale=ssm_context_scale,
+                        retain_init=ssm_retain_init,
+                        retain_floor=ssm_retain_floor,
+                        write_init=ssm_write_init,
+                        write_max=ssm_write_max)
 
 
         self.l1 = TCN_ViT_unit(3, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=1, use_ctr=1 in ctr_layers, ssm_args=ssm_args_for(1))

@@ -19,7 +19,11 @@ class MambaBlock(nn.Module):
                  bidir_init=0.1, bc_norm=False, bc_norm_gain=0.1,
                  bc_norm_bias=0.1, bc_norm_eps=1e-6,
                  joint_state=False, num_joints=25, joint_state_weight=0.1,
-                 dual_scale=False, slow_scale=0.5, scale_gate_init=0.1):
+                 dual_scale=False, slow_scale=0.5, scale_gate_init=0.1,
+                 context_write=False, retain_write=False, context_rank=16,
+                 context_kernels=(3, 5, 7), context_scale=0.1,
+                 retain_init=0.5, retain_floor=0.25, write_init=1.0,
+                 write_max=2.0):
         super().__init__()
         import math
         if (joint_state or dual_scale) and (bidirectional or motion_delta or bc_norm):
@@ -28,8 +32,21 @@ class MambaBlock(nn.Module):
             raise ValueError('Screen joint_state and dual_scale separately before combining candidates')
         if not math.isfinite(joint_state_weight) or joint_state_weight <= 0:
             raise ValueError('joint_state_weight must be finite and positive')
+        if (context_write or retain_write) and (joint_state or dual_scale):
+            raise ValueError('context/retain screening must not be combined with joint_state or dual_scale')
+        if (context_write or retain_write) and (bidirectional or motion_delta or bc_norm):
+            raise ValueError('New algorithm candidates must run independently of old SSM variants')
 
-        if dual_scale:
+        if context_write or retain_write:
+            from mamba_ssm.modules.mamba_context_write import ContextWriteMamba
+            self.mamba = ContextWriteMamba(
+                d_model=embed_dim, d_state=16, d_conv=4, expand=2,
+                context_write=context_write, retain_write=retain_write,
+                context_rank=context_rank, context_kernels=context_kernels,
+                context_scale=context_scale, retain_init=retain_init,
+                retain_floor=retain_floor, write_init=write_init,
+                write_max=write_max)
+        elif dual_scale:
             from mamba_ssm.modules.mamba_dual_scale import DualScaleMamba
             self.mamba = DualScaleMamba(d_model=embed_dim, d_state=16, d_conv=4,
                                        expand=2, slow_scale=slow_scale,

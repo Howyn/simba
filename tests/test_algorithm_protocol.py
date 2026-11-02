@@ -87,11 +87,16 @@ class ProtocolTest(unittest.TestCase):
         return directory, identity, actual
 
     def test_modes_share_common_recipe_but_not_raw_config_hash(self):
-        baseline, joint, dual = (self.identity(mode) for mode in protocol.MODES)
-        for candidate in (joint, dual):
+        identities = {mode: self.identity(mode) for mode in protocol.MODES}
+        baseline = identities['baseline']
+        self.assertEqual(len(identities), len(protocol.MODES))
+        for mode, candidate in identities.items():
+            if mode == 'baseline':
+                continue
             self.assertEqual(candidate['recipe_fingerprint'], baseline['recipe_fingerprint'])
             self.assertEqual(candidate['source_sha256'], baseline['source_sha256'])
             self.assertNotEqual(candidate['config_sha256'], baseline['config_sha256'])
+        joint = identities['joint_state']
         changed_seed = self.identity('joint_state', seed=99)
         self.assertEqual(changed_seed['seed'], 99)
         self.assertNotEqual(changed_seed['recipe_fingerprint'], joint['recipe_fingerprint'])

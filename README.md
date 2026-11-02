@@ -87,6 +87,8 @@ Replace path_to_model_weights argument to the saved model weights you obtain aft
 
 The optional `ssm_bidir`, `ssm_motion`, and `ssm_bidir_motion` modes add shared-encoder bidirectional state scans and/or motion-conditioned delta inside Mamba. See [the AutoDL 10-epoch experiment guide](docs/ssm_experiments.md) for GPU checks, ablations, and commands. Existing baseline configurations retain the original Mamba path.
 
+The current round modifies the l4 state update itself: a multi-scale context write (`ssm_context_layers`) plus decoupled retain/write gains (`ssm_retain_layers`), either separately or together. It runs a five-epoch screen against a reusable baseline and extends only the pre-registered winner to ten epochs. See [the five-epoch context/retain guide](docs/ssm_context_memory_5ep.md); start with `python -m unittest discover -s tests -p "test_context_*.py"`, then `python tools/check_algorithm_signal.py context_retain_write`, then `bash run_context_stage.sh start5 --modes context_write retain_write context_retain_write`.
+
 For the budget-limited 20-epoch comparison, including detached background runs, checkpoint recovery, live logs, and a four-group result summary, see [the 20-epoch experiment guide](docs/ssm_full_experiments.md). Run the baseline and combined model first with `bash run_full_experiments.sh start --modes baseline ssm_bidir_motion`.
 
 For the single-candidate 10-epoch B/C normalization trial, see [the B/C Norm guide](docs/bc_norm_10ep.md). After the CUDA checks, use `bash run_bc_experiment.sh start`; `results` compares against only the first 10 epochs of the existing baseline run.

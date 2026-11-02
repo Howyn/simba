@@ -16,7 +16,8 @@ import sys
 
 
 SCHEMA_VERSION = 1
-MODES = ('baseline', 'joint_state', 'dual_scale')
+MODES = ('baseline', 'joint_state', 'dual_scale', 'context_write',
+         'retain_write', 'context_retain_write')
 MANIFEST_NAME = 'run_manifest.json'
 SOURCE_FILES = (
     'main.py', 'mamba_blocks.py', 'model/Hyperformer.py', 'layers.py',
@@ -24,10 +25,12 @@ SOURCE_FILES = (
     'mamba_ssm/modules/mamba_simple.py',
     'mamba_ssm/modules/mamba_joint_state.py',
     'mamba_ssm/modules/mamba_dual_scale.py',
+    'mamba_ssm/modules/mamba_context_write.py',
     'mamba_ssm/ops/selective_scan_interface.py',
     'feeders/feeder_ntu.py', 'feeders/tools.py',
     'tools/check_algorithm_signal.py', 'tools/ssm_optimizer.py',
     'tools/training_rng.py', 'tools/algorithm_protocol.py',
+    'tools/verify_baseline_architecture.py',
     'requirements-autodl.txt',
 )
 ALGORITHM_MODEL_KEYS = frozenset((
@@ -38,6 +41,9 @@ ALGORITHM_MODEL_KEYS = frozenset((
     'ssm_bc_norm_gain', 'ssm_bc_norm_bias', 'ssm_bc_norm_eps',
     'ssm_joint_state_layers', 'ssm_joint_state_weight',
     'ssm_dual_scale_layers', 'ssm_slow_scale', 'ssm_scale_gate_init',
+    'ssm_context_layers', 'ssm_retain_layers', 'ssm_context_rank',
+    'ssm_context_kernels', 'ssm_context_scale', 'ssm_retain_init',
+    'ssm_retain_floor', 'ssm_write_init', 'ssm_write_max',
 ))
 IGNORED_RECIPE_KEYS = frozenset((
     'work_dir', 'model_saved_name', 'config', 'phase', 'num_epoch',
@@ -310,6 +316,70 @@ def _assert_baseline_algorithms_off(config):
         enabled.append('ssm_protect_addons')
     if enabled:
         raise RuntimeError('Baseline actual config enables algorithm changes: ' + ', '.join(enabled))
+
+
+def validate_legacy_baseline(root, directory, seed, expected_identity):
+    """Verify a baseline produced before the current source revision.
+
+    Adding new candidate modules changes ``source_sha256`` for every mode, so a
+    strict manifest comparison would force a redundant baseline retrain even
+    though the baseline network is untouched. This check proves everything that
+    still decides comparability and reports what it could not compare:
+
+    * the saved actual trainer configuration, with every algorithm flag off;
+    * seed, training recipe, dataset fingerprint and GPU/runtime identity;
+    * an existing manifest, reporting ``code_drift`` instead of accepting it
+      silently.
+
+    Architecture equality is not decided here: the caller must additionally
+    compare the baseline checkpoint's parameter names/shapes against a freshly
+    constructed baseline model (``tools/verify_baseline_architecture.py``).
+    Nothing is modified or overwritten.
+    """
+    directory = Path(directory)
+    if not (directory / 'config.yaml').is_file():
+        raise FileNotFoundError(f'Baseline actual config.yaml is missing: {directory / "config.yaml"}')
+    expected = _identity(expected_identity)
+    for key in ('dataset_sha256', 'recipe_fingerprint', 'device', 'seed'):
+        if key not in expected:
+            raise RuntimeError('The expected baseline identity is incomplete')
+    if expected.get('seed') != seed:
+        raise RuntimeError('The expected baseline identity uses a different seed')
+    actual = _saved_config(directory / 'config.yaml')
+    _assert_baseline_algorithms_off(actual)
+    if actual.get('seed') != seed:
+        raise RuntimeError('Baseline actual config seed does not match the requested seed')
+    _, nominal = _read_config(root, 'baseline')
+    expected_recipe = canonical_recipe(nominal, seed)
+    actual_recipe = canonical_recipe(actual, seed)
+    actual_recipe = {key: actual_recipe.get(key) for key in expected_recipe}
+    if actual_recipe != expected_recipe:
+        differing = [key for key in expected_recipe if actual_recipe.get(key) != expected_recipe[key]]
+        raise RuntimeError('Baseline actual training recipe differs: ' + ', '.join(differing))
+    train = actual.get('train_feeder_args', {}).get('data_path')
+    test = actual.get('test_feeder_args', {}).get('data_path')
+    if not train or train != test:
+        raise RuntimeError('Baseline actual config must train and test on one NTU NPZ data_path')
+    dataset = dataset_fingerprint(root, train)
+    if dataset != expected.get('dataset_sha256'):
+        raise RuntimeError('Baseline dataset fingerprint differs from the current dataset')
+    device = runtime_identity()
+    if device != expected.get('device'):
+        raise RuntimeError('Baseline GPU/runtime identity differs from the current device')
+    notes = dict(directory=str(directory.resolve()), seed=seed,
+                 dataset_sha256=dataset, recipe_verified=True,
+                 algorithms_off=True, device_verified=True,
+                 manifest_present=(directory / MANIFEST_NAME).is_file(),
+                 source_sha256_compared=False, code_drift=False,
+                 recorded_source_sha256=None)
+    if notes['manifest_present']:
+        record = _identity(load_manifest(directory))
+        notes['recorded_source_sha256'] = record.get('source_sha256')
+        if record.get('source_sha256') == expected.get('source_sha256'):
+            notes['source_sha256_compared'] = True
+        else:
+            notes['code_drift'] = True
+    return notes
 
 
 def validate_baseline_manifest(root, directory, seed, expected_identity):

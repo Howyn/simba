@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .idea/
+.venv/
+venv/
 work_dir/
 data/
 *.npz

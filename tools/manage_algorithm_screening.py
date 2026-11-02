@@ -21,10 +21,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools import manage_full_experiments as legacy
 
-MODES = ('baseline', 'joint_state', 'dual_scale')
+MODES = ('baseline', 'joint_state', 'dual_scale',
+         'context_write', 'retain_write', 'context_retain_write')
 CANDIDATES = MODES[1:]
+CONTEXT_MODES = ('context_write', 'retain_write', 'context_retain_write')
+COMBINATION_MODE = 'context_retain_write'
+STAGE_MODES = ('baseline',) + CONTEXT_MODES
+COMBINATION_MARGIN = 0.2
 PAIRING_FIELDS = ('schema_version', 'seed', 'source_sha256', 'dataset_sha256',
                   'recipe_fingerprint', 'device')
+# Parameter-layout proofs are one CPU model construction each; cache per process.
+_ARCHITECTURE_CACHE = {}
 
 
 def group_dir(root, mode, seed=4321):
@@ -172,6 +179,60 @@ def read_json(path):
     return json.loads(path.read_text(encoding='utf-8')) if path.is_file() else {}
 
 
+def classify5(comparison, signal_passed=True):
+    """Pre-registered five-epoch rule for the context/retain stage.
+
+    Promotion needs all three conditions: mean Top1 over epochs 3-5 at least
+    0.5 percentage points above the paired baseline, at least four of the five
+    epochs ahead, and epochs 3, 4 and 5 all ahead.
+    """
+    if signal_passed is False:
+        return '先修模块'
+    if not comparison['completed'] or comparison['paired_epochs'] != 5:
+        return '未完成'
+    delta = comparison['delta_last3']
+    if delta is None:
+        return '未完成'
+    final_wins = sum(value > 0 for value in comparison['last3_deltas'])
+    if delta >= 0.5 - 1e-9 and comparison['wins'] >= 4 and final_wins == 3:
+        return '值得追加'
+    return '观察' if delta > 0 else '暂缓'
+
+
+def eligible5(comparisons):
+    """Eligible candidates after the combination-margin preference.
+
+    A combination must beat the stronger single mechanism by about 0.2 points
+    on the epochs 3-5 mean; otherwise the single mechanism is preferred, as
+    pre-registered. Keeping the single one also makes the winning claim about
+    one mechanism instead of an unexplained sum.
+    """
+    eligible = {mode: result for mode, result in comparisons.items()
+                if mode in CONTEXT_MODES and result.get('signal_passed', True) is True
+                and result.get('comparison_valid', True)
+                and classify5(result) == '值得追加'}
+    if COMBINATION_MODE not in eligible:
+        return eligible
+    singles = {mode: result for mode, result in eligible.items() if mode != COMBINATION_MODE}
+    if not singles:
+        return eligible
+    best_single = max(singles.values(), key=lambda result: result['delta_last3'])
+    if eligible[COMBINATION_MODE]['delta_last3'] < best_single['delta_last3'] + COMBINATION_MARGIN - 1e-9:
+        return singles
+    return eligible
+
+
+def choose_winner5(comparisons):
+    eligible = eligible5(comparisons)
+    if not eligible:
+        return None
+    def order(mode):
+        result = eligible[mode]
+        cost = result.get('training_hours')
+        return (result['delta_last3'], result['wins'], -(cost if cost is not None else float('inf')))
+    return max(eligible, key=order)
+
+
 def baseline_directory(root, seed):
     reference = read_json(queue_dir(root, seed) / 'baseline_reference.json')
     return Path(reference['directory']) if reference else group_dir(root, 'baseline', seed)
@@ -183,11 +244,16 @@ def protocol_module():
     return algorithm_protocol
 
 
-def stored_comparable(candidate_dir, baseline_dir):
+def stored_comparable(candidate_dir, baseline_dir, legacy=False):
     a = read_json(candidate_dir / 'run_manifest.json')
     b = read_json(baseline_dir / 'run_manifest.json')
-    return bool(a and b and all(field in a and field in b and a[field] == b[field]
-                                for field in PAIRING_FIELDS))
+    if bool(a and b and all(field in a and field in b and a[field] == b[field]
+                            for field in PAIRING_FIELDS)):
+        return True
+    # A frozen legacy baseline may predate the current source revision. Its
+    # recipe, dataset, device and parameter layout were verified once when the
+    # reference was frozen, so only the candidate's own manifest is required.
+    return bool(legacy and a)
 
 
 def validate_pairing(identities):
@@ -201,15 +267,24 @@ def validate_pairing(identities):
                                'Use the same data, device, seed and training recipe for every group.')
 
 
-def load_comparisons(root, seed):
+def frozen_reference(root, seed):
+    return read_json(queue_dir(root, seed) / 'baseline_reference.json')
+
+
+def load_comparisons(root, seed, epochs=10, candidates=None):
     base_dir = baseline_directory(root, seed)
+    legacy = bool(frozen_reference(root, seed).get('legacy'))
     baseline = parse_curve(base_dir)
+    if candidates is None:
+        candidates = [mode for mode in CANDIDATES
+                      if group_dir(root, mode, seed).exists()
+                      or receipt_path(root, mode, seed).is_file()]
     results = {}
-    for mode in CANDIDATES:
-        result = compare(parse_curve(group_dir(root, mode, seed)), baseline, 10)
+    for mode in candidates:
+        result = compare(parse_curve(group_dir(root, mode, seed)), baseline, epochs)
         receipt = read_json(receipt_path(root, mode, seed))
         result['signal_passed'] = receipt.get('passed') is True
-        result['comparison_valid'] = stored_comparable(group_dir(root, mode, seed), base_dir)
+        result['comparison_valid'] = stored_comparable(group_dir(root, mode, seed), base_dir, legacy)
         results[mode] = result
     return results
 
@@ -259,6 +334,53 @@ def show_results(root, seed, as_json=False):
     return output
 
 
+def show_stage_results(root, seed, as_json=False, epochs=5):
+    """Report the context/retain stage and any ten-epoch extension already run."""
+    baseline_dir = baseline_directory(root, seed)
+    baseline = parse_curve(baseline_dir)
+    reference = frozen_reference(root, seed)
+    comparisons = load_comparisons(root, seed, epochs, CONTEXT_MODES)
+    output = {'seed': seed, 'stage_epochs': epochs,
+              'baseline_directory': str(baseline_dir),
+              'baseline_legacy_reuse': bool(reference.get('legacy')),
+              'baseline': metrics(baseline, epochs), 'candidates': {},
+              'recommended_extension': choose_winner5(comparisons)}
+    baseline_ten = metrics(baseline, 10)
+    for mode, result in comparisons.items():
+        receipt = read_json(receipt_path(root, mode, seed))
+        result['decision'] = (classify5(result, receipt.get('passed') is True) if receipt
+                              else '先修模块' if result['completed'] else '未检查')
+        if result['completed'] and not result['comparison_valid']:
+            result['decision'] = '配方未核验'
+        result['ten_epochs'] = compare(parse_curve(group_dir(root, mode, seed)), baseline, 10)
+        output['candidates'][mode] = result
+    if as_json:
+        print(json.dumps(output, ensure_ascii=False, indent=2))
+        return output
+    def number(value):
+        return '-' if value is None else f'{value:.4f}'
+    base = output['baseline']
+    print(f'mode\tE{epochs}\tmean3-{epochs}\tbest{epochs}\tdelta_E{epochs}_pp'
+          f'\tdelta_mean3-{epochs}_pp\twins/{epochs}\tdecision')
+    print('\t'.join(('baseline', number(base['final']), number(base['last3']), number(base['best']),
+                     '0', '0', '-', 'reference' if base['completed'] else 'incomplete')))
+    for mode, result in output['candidates'].items():
+        print('\t'.join((mode, number(result['final']), number(result['last3']), number(result['best']),
+                         number(result['delta_final']), number(result['delta_last3']),
+                         str(result['wins']), result['decision'])))
+        print(f'  last3 deltas: {result["last3_deltas"]}; '
+              f'train-hours(excludes eval): {number(result["training_hours"])}; '
+              f'peak-memory-MiB: {number(result["peak_memory_mib"])}')
+        ten = result['ten_epochs']
+        if ten['completed']:
+            print(f'  E10={number(ten["final"])} (delta={number(ten["delta_final"])} pp); '
+                  f'mean8-10={number(ten["last3"])} (delta={number(ten["delta_last3"])} pp); '
+                  f'wins/10={ten["wins"]}; baseline10 E10={number(baseline_ten["final"])}')
+    print('Recommended single extension:', output['recommended_extension'] or 'none')
+    print('Five-epoch rules are exploratory budget rules, not statistical significance.')
+    return output
+
+
 def validate_receipt(root, mode, seed, identity):
     path = receipt_path(root, mode, seed)
     receipt = read_json(path)
@@ -288,7 +410,7 @@ def checkpoint_header(path):
         raise RuntimeError(f'Invalid checkpoint metadata returned for {path}') from None
 
 
-def validate_checkpoint(path, target, require_tenth=False):
+def validate_checkpoint(path, target, require_tenth=False, required_epoch=None):
     header = checkpoint_header(path)
     epoch = header.get('epoch')
     if (not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0 or epoch >= target
@@ -296,6 +418,9 @@ def validate_checkpoint(path, target, require_tenth=False):
         raise RuntimeError(f'{path}: checkpoint epoch/model/optimizer does not match target {target}')
     if require_tenth and epoch != 9:
         raise RuntimeError(f'{path}: extending to 20 requires the actual epoch-10 latest checkpoint, got {epoch + 1}')
+    if required_epoch is not None and epoch + 1 != required_epoch:
+        raise RuntimeError(f'{path}: extending to {target} requires the actual epoch-{required_epoch} '
+                           f'latest checkpoint, got {epoch + 1}')
     if not header.get('has_rng'):
         raise RuntimeError(f'{path}: RNG state is missing. Strict paired continuation is refused; '
                            'do not silently resume a legacy/best checkpoint.')
@@ -315,21 +440,57 @@ def plan_mode(root, mode, seed, target, identity):
         if not checkpoint.is_file():
             raise RuntimeError(f'{directory}: unfinished run has no runs-latest.pt; preserving files, refusing overwrite.')
         require_tenth = target == 20 and complete(curve, 10) and max(curve['scores'], default=0) <= 10
-        validate_checkpoint(checkpoint, target, require_tenth=require_tenth)
+        required_epoch = None
+        if target == 10 and complete(curve, 5) and max(curve['scores'], default=0) <= 5:
+            required_epoch = 5
+        validate_checkpoint(checkpoint, target, require_tenth=require_tenth,
+                            required_epoch=required_epoch)
         return 'resume', checkpoint
     if target == 20:
         raise RuntimeError(f'{mode}: a complete 10-epoch run is required before extending to 20.')
+    if target == 10 and mode in CONTEXT_MODES:
+        raise RuntimeError(f'{mode}: a complete 5-epoch stage is required before extending to 10.')
     return 'new', None
 
 
-def validate_reference(root, seed, identity):
-    reference = read_json(queue_dir(root, seed) / 'baseline_reference.json')
+def verify_baseline_architecture(directory):
+    """Compare the saved baseline checkpoint layout with the current code."""
+    script = ROOT / 'tools/verify_baseline_architecture.py'
+    process = subprocess.run([sys.executable, str(script), '--directory', str(directory)],
+                             capture_output=True, text=True, encoding='utf-8', errors='replace')
+    lines = [line for line in process.stdout.splitlines() if line.strip()]
+    if process.returncode or not lines:
+        detail = (process.stderr or process.stdout).strip()[-2000:]
+        raise RuntimeError(f'Baseline architecture proof failed for {directory}: {detail}')
+    try:
+        record = json.loads(lines[-1])
+    except ValueError:
+        raise RuntimeError(f'Baseline architecture proof returned invalid JSON for {directory}') from None
+    if record.get('ok') is not True:
+        differing = record.get('mismatched') or record.get('missing') or record.get('unexpected')
+        raise RuntimeError('Baseline checkpoint layout differs from the current baseline network: '
+                           f'{record.get("error") or differing}')
+    return record
+
+
+def validate_reference(root, seed, identity, target=10):
+    reference = frozen_reference(root, seed)
     if not reference:
         return None
     directory = Path(reference['directory'])
-    protocol_module().validate_baseline_manifest(root, directory, seed, identity)
-    if not complete(parse_curve(directory), 20):
-        raise RuntimeError('A reused external baseline must have all 20 epochs; external runs are never extended or overwritten.')
+    legacy = bool(reference.get('legacy'))
+    if legacy:
+        if reference.get('architecture_verified') is not True:
+            raise RuntimeError('The frozen legacy baseline has no architecture proof; freeze it again.')
+        protocol_module().validate_legacy_baseline(root, directory, seed, identity)
+        if not complete(parse_curve(directory), target):
+            raise RuntimeError(f'The frozen legacy baseline has fewer than {target} complete epochs; '
+                               'external runs are never extended or overwritten.')
+    else:
+        protocol_module().validate_baseline_manifest(root, directory, seed, identity)
+        if not complete(parse_curve(directory), 20):
+            raise RuntimeError('A reused external baseline must have all 20 epochs; '
+                               'external runs are never extended or overwritten.')
     return directory
 
 
@@ -355,6 +516,65 @@ def reuse_baseline(root, seed, directory):
     print(f'Frozen reusable baseline: {directory}; no source results were modified.')
 
 
+def validate_baseline_for_pairing(root, seed, identity, target=10):
+    """Validate the baseline a candidate is paired with, once per process.
+
+    A frozen reference goes through ``validate_reference``. Otherwise the local
+    baseline group is checked through the legacy-compatible path plus a cached
+    parameter-layout proof, so a baseline trained before this source revision
+    can still be reused without retraining it.
+    """
+    reference = frozen_reference(root, seed)
+    if reference:
+        return validate_reference(root, seed, identity, target)
+    directory = group_dir(root, 'baseline', seed)
+    protocol_module().validate_legacy_baseline(root, directory, seed, identity)
+    key = str(directory.resolve())
+    if key not in _ARCHITECTURE_CACHE:
+        _ARCHITECTURE_CACHE[key] = verify_baseline_architecture(directory)
+    return directory
+
+
+def reuse_legacy_baseline(root, seed, directory):
+    """Freeze a baseline trained before the current source revision.
+
+    Adding the context/retain modules changes every mode's source fingerprint,
+    which would otherwise force a redundant baseline retrain. Reuse is allowed
+    only after proving the saved actual recipe, dataset, device and the
+    checkpoint's parameter layout still match the current baseline network. The
+    reference records exactly what was and was not compared.
+    """
+    directory = directory.resolve()
+    if legacy.manager_alive(legacy.read_state(queue_dir(root, seed))) or legacy.training_processes(root):
+        raise RuntimeError('Finish the current queue/training before freezing a baseline reference.')
+    protocol = protocol_module()
+    identity = protocol.current_identity(root, 'baseline', seed)
+    notes = protocol.validate_legacy_baseline(root, directory, seed, identity)
+    curve = parse_curve(directory)
+    if not complete(curve, 5):
+        raise RuntimeError('Legacy reuse requires at least the first five evaluated epochs of that run.')
+    proof = verify_baseline_architecture(directory)
+    queue = queue_dir(root, seed)
+    previous = frozen_reference(root, seed)
+    if previous and Path(previous['directory']) != directory:
+        raise RuntimeError('A different baseline reference is already frozen for this seed; do not change it after screening.')
+    local = group_dir(root, 'baseline', seed)
+    if local.exists() and any(local.iterdir()) and local.resolve() != directory:
+        raise RuntimeError('This seed already has its own baseline run; refusing a second reference.')
+    queue.mkdir(parents=True, exist_ok=True)
+    record = dict(directory=str(directory), seed=seed, legacy=True,
+                  architecture_verified=True, architecture=proof, baseline=notes,
+                  available_epochs=len(curve['scores']),
+                  validated_at=datetime.now(timezone.utc).isoformat())
+    (queue / 'baseline_reference.json').write_text(json.dumps(record, indent=2, ensure_ascii=False),
+                                                   encoding='utf-8')
+    print(f'Frozen reusable legacy baseline: {directory} ({record["available_epochs"]} scored epochs).')
+    print('Verified: actual recipe, seed, dataset fingerprint, GPU/runtime, algorithms off, '
+          f'and {proof["parameters"]} parameters in an identical checkpoint layout.')
+    print('Not compared: source_sha256 of the old run (the new candidate modules changed it). '
+          'No source result was modified.')
+
+
 def preflight(root, seed, modes, target, inspect_processes=True):
     if not modes or len(set(modes)) != len(modes):
         raise ValueError('Choose a nonempty list of distinct modes explicitly')
@@ -365,7 +585,11 @@ def preflight(root, seed, modes, target, inspect_processes=True):
     protocol = protocol_module()
     identities = {mode: protocol.current_identity(root, mode, seed) for mode in set(modes) | {'baseline'}}
     validate_pairing(identities)
-    reference = validate_reference(root, seed, identities['baseline'])
+    if target == 5:
+        return stage5_preflight(root, seed, tuple(modes), identities)
+    if target == 10 and any(mode in CONTEXT_MODES for mode in modes):
+        return extension10_preflight(root, seed, tuple(modes), identities)
+    reference = validate_reference(root, seed, identities['baseline'], target)
     if target == 10:
         if reference and 'baseline' in modes:
             modes = tuple(mode for mode in modes if mode != 'baseline')
@@ -376,8 +600,7 @@ def preflight(root, seed, modes, target, inspect_processes=True):
             if 'baseline' not in modes and not complete(base_curve, 10):
                 raise RuntimeError('Run baseline first, or explicitly include it first in --modes.')
             if complete(base_curve, 10):
-                protocol.validate_baseline_manifest(root, group_dir(root, 'baseline', seed), seed,
-                                                    identities['baseline'])
+                validate_baseline_for_pairing(root, seed, identities['baseline'], target)
         for mode in modes:
             if mode in CANDIDATES:
                 validate_receipt(root, mode, seed, identities[mode])
@@ -389,11 +612,69 @@ def preflight(root, seed, modes, target, inspect_processes=True):
         if tuple(modes) != allowed:
             raise RuntimeError(f'Extension mode list must be {list(allowed)}.')
         if not reference:
-            protocol.validate_baseline_manifest(root, group_dir(root, 'baseline', seed), seed,
-                                                identities['baseline'])
+            validate_baseline_for_pairing(root, seed, identities['baseline'], target)
         validate_receipt(root, selected[0], seed, identities[selected[0]])
     plans = {mode: plan_mode(root, mode, seed, target, identities[mode]) for mode in modes}
     return tuple(modes), identities, plans
+
+
+def stage5_preflight(root, seed, modes, identities):
+    """Preflight for the five-epoch context/retain stage."""
+    unknown = [mode for mode in modes if mode not in STAGE_MODES]
+    if unknown:
+        raise ValueError(f'start5 accepts only {list(STAGE_MODES)}; got {unknown}')
+    reference = validate_reference(root, seed, identities['baseline'], 5)
+    if reference and 'baseline' in modes:
+        modes = tuple(mode for mode in modes if mode != 'baseline')
+        print('Frozen baseline reference is in use; the baseline group is skipped.')
+    if 'baseline' in modes and modes[0] != 'baseline':
+        raise RuntimeError('When building the baseline in this queue, list baseline first.')
+    if not modes:
+        raise RuntimeError('Nothing to run: the frozen baseline already covers the five-epoch stage.')
+    if 'baseline' not in modes and not reference:
+        if not complete(parse_curve(group_dir(root, 'baseline', seed)), 5):
+            raise RuntimeError('Run baseline first, or explicitly include it first in --modes.')
+        validate_baseline_for_pairing(root, seed, identities['baseline'], 5)
+    for mode in modes:
+        if mode in CONTEXT_MODES:
+            validate_receipt(root, mode, seed, identities[mode])
+    plans = {mode: plan_mode(root, mode, seed, 5, identities[mode]) for mode in modes}
+    return modes, identities, plans
+
+
+def extension10_preflight(root, seed, modes, identities):
+    """Preflight for extending the single five-epoch winner to ten epochs."""
+    selected = [mode for mode in modes if mode in CONTEXT_MODES]
+    if len(selected) != 1:
+        raise RuntimeError('A 10-epoch extension must contain exactly one context candidate.')
+    allowed = extension_modes_stage(root, seed, selected[0])
+    if modes != allowed:
+        raise RuntimeError(f'Extension mode list must be {list(allowed)}.')
+    base_dir = validate_baseline_for_pairing(root, seed, identities['baseline'], 10)
+    if not complete(parse_curve(base_dir), 5):
+        raise RuntimeError('The 10-epoch extension requires a baseline with five complete epochs.')
+    validate_receipt(root, selected[0], seed, identities[selected[0]])
+    plans = {mode: plan_mode(root, mode, seed, 10, identities[mode]) for mode in modes}
+    return modes, identities, plans
+
+
+def extension_modes_stage(root, seed, selected):
+    """Only the pre-registered five-epoch winner may be extended to ten."""
+    comparisons = load_comparisons(root, seed, 5, CONTEXT_MODES)
+    winner = choose_winner5(comparisons)
+    if selected != winner:
+        raise RuntimeError(f'Only the single eligible five-epoch winner may be extended. '
+                           f'Current recommendation: {winner or "none"}.')
+    selection = read_json(queue_dir(root, seed) / 'stage_extension.json')
+    if selection and selection.get('mode') != selected:
+        raise RuntimeError(f'This seed already allocated its five-epoch extension to '
+                           f'{selection.get("mode")}; refusing a second candidate.')
+    base_dir = baseline_directory(root, seed)
+    if complete(parse_curve(base_dir), 10):
+        return (selected,)
+    if base_dir != group_dir(root, 'baseline', seed):
+        raise RuntimeError('Reused external baseline is not complete at 10; it will not be modified.')
+    return ('baseline', selected)
 
 
 def extension_modes(root, seed, selected):
@@ -429,7 +710,10 @@ def start_queue(root, seed, modes, target, selected=None):
         queue.mkdir(parents=True, exist_ok=True)
         legacy.write_state(queue, status='starting', current_mode=None, modes=list(modes), target=target, seed=seed)
         if selected:
-            (queue / 'extension_selection.json').write_text(json.dumps(dict(mode=selected, seed=seed), indent=2), encoding='utf-8')
+            selection_name = ('stage_extension.json'
+                              if target == 10 and any(mode in CONTEXT_MODES for mode in modes)
+                              else 'extension_selection.json')
+            (queue / selection_name).write_text(json.dumps(dict(mode=selected, seed=seed), indent=2), encoding='utf-8')
         command = [sys.executable, str(Path(__file__).resolve()), '--seed', str(seed),
                    '_run', '--target', str(target), '--lock-fd', str(handle.fileno()), '--modes', *modes]
         with (queue / 'runner.log').open('a', buffering=1, encoding='utf-8') as output:
@@ -461,8 +745,9 @@ def run_modes(root, seed, modes, target, spawn=None):
         if legacy.training_processes(root):
             raise RuntimeError('Another main.py appeared; stopping before the next group.')
         if mode in CANDIDATES:
-            protocol_module().validate_baseline_manifest(root, baseline_directory(root, seed), seed,
-                                                        current)
+            if validate_reference(root, seed, current, target) is None:
+                protocol_module().validate_legacy_baseline(
+                    root, group_dir(root, 'baseline', seed), seed, current)
         directory = group_dir(root, mode, seed)
         directory.mkdir(parents=True, exist_ok=True)
         if action == 'new':
@@ -565,30 +850,47 @@ def main():
     commands = parser.add_subparsers(dest='command', required=True)
     start = commands.add_parser('start10', help='explicitly launch selected 10-epoch groups after receipt checks')
     start.add_argument('--modes', nargs='+', choices=MODES, required=True)
+    start5 = commands.add_parser('start5', help='launch the five-epoch context/retain stage')
+    start5.add_argument('--modes', nargs='+', choices=STAGE_MODES, required=True)
+    extend10 = commands.add_parser('extend10', help='extend the single eligible five-epoch winner to ten epochs')
+    extend10.add_argument('--mode', choices=CONTEXT_MODES, required=True)
     extend = commands.add_parser('extend20', help='explicitly extend the single eligible winner and its baseline')
     extend.add_argument('--mode', choices=CANDIDATES, required=True)
     reuse = commands.add_parser('reuse-baseline', help='freeze an existing manifest-verified complete baseline20')
     reuse.add_argument('--directory', type=Path, required=True)
+    legacy_reuse = commands.add_parser(
+        'reuse-legacy-baseline',
+        help='freeze a baseline trained before this source revision after recipe/layout verification')
+    legacy_reuse.add_argument('--directory', type=Path, required=True)
     worker = commands.add_parser('_run', help=argparse.SUPPRESS)
     worker.add_argument('--modes', nargs='+', choices=MODES, required=True)
-    worker.add_argument('--target', type=int, choices=(10, 20), required=True)
+    worker.add_argument('--target', type=int, choices=(5, 10, 20), required=True)
     worker.add_argument('--lock-fd', type=int)
     commands.add_parser('status')
     results = commands.add_parser('results')
     results.add_argument('--json', action='store_true')
+    results5 = commands.add_parser('results5', help='summarize the five-epoch context/retain stage')
+    results5.add_argument('--json', action='store_true')
     log = commands.add_parser('logs')
     log.add_argument('--mode', choices=MODES)
     log.add_argument('--lines', type=int, default=40)
     log.add_argument('--follow', action='store_true')
     args = parser.parse_args()
     try:
-        if args.command == 'start10':
+        if args.command == 'start5':
+            start_queue(ROOT, args.seed, tuple(args.modes), 5)
+        elif args.command == 'extend10':
+            modes = extension_modes_stage(ROOT, args.seed, args.mode)
+            start_queue(ROOT, args.seed, modes, 10, selected=args.mode)
+        elif args.command == 'start10':
             start_queue(ROOT, args.seed, tuple(args.modes), 10)
         elif args.command == 'extend20':
             modes = extension_modes(ROOT, args.seed, args.mode)
             start_queue(ROOT, args.seed, modes, 20, selected=args.mode)
         elif args.command == 'reuse-baseline':
             reuse_baseline(ROOT, args.seed, args.directory)
+        elif args.command == 'reuse-legacy-baseline':
+            reuse_legacy_baseline(ROOT, args.seed, args.directory)
         elif args.command == '_run':
             return run_worker(ROOT, args.seed, tuple(args.modes), args.target, args.lock_fd)
         elif args.command == 'status':
@@ -597,6 +899,8 @@ def main():
             show_results(ROOT, args.seed)
         elif args.command == 'results':
             show_results(ROOT, args.seed, args.json)
+        elif args.command == 'results5':
+            show_stage_results(ROOT, args.seed, args.json)
         else:
             if args.lines < 1:
                 parser.error('--lines must be positive')
