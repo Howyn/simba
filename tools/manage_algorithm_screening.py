@@ -509,7 +509,10 @@ def reuse_baseline(root, seed, directory):
         raise RuntimeError('A different baseline reference is already frozen for this seed; do not change it after screening.')
     local = group_dir(root, 'baseline', seed)
     if local.exists() and any(local.iterdir()) and local.resolve() != directory:
-        raise RuntimeError('This seed already has its own baseline run; refusing a second reference.')
+        raise RuntimeError(
+            f'This seed already has its own baseline run at {local}. '
+            'Freeze that directory instead, or move it aside (rename, do not delete) '
+            'if you deliberately want a different baseline as the reference.')
     queue.mkdir(parents=True, exist_ok=True)
     record = dict(directory=str(directory), seed=seed, validated_at=datetime.now(timezone.utc).isoformat())
     (queue / 'baseline_reference.json').write_text(json.dumps(record, indent=2), encoding='utf-8')
@@ -560,7 +563,10 @@ def reuse_legacy_baseline(root, seed, directory):
         raise RuntimeError('A different baseline reference is already frozen for this seed; do not change it after screening.')
     local = group_dir(root, 'baseline', seed)
     if local.exists() and any(local.iterdir()) and local.resolve() != directory:
-        raise RuntimeError('This seed already has its own baseline run; refusing a second reference.')
+        raise RuntimeError(
+            f'This seed already has its own baseline run at {local}. '
+            'Freeze that directory instead, or move it aside (rename, do not delete) '
+            'if you deliberately want a different baseline as the reference.')
     queue.mkdir(parents=True, exist_ok=True)
     record = dict(directory=str(directory), seed=seed, legacy=True,
                   architecture_verified=True, architecture=proof, baseline=notes,
