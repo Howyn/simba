@@ -113,9 +113,13 @@ def explicit_output(model, inputs):
         retain = model.retain_floor + (1 - model.retain_floor) * torch.sigmoid(model.retain_logit)
         write = model.write_max * torch.sigmoid(model.write_logit)
         delta = delta * retain[None, :, None]
-        u = u * (write / retain)[None, :, None]
+        # The scan input carries w/r; the D skip below keeps the original u so
+        # the write gain never leaks into the shortcut path.
+        u_scan = u * (write / retain)[None, :, None]
+    else:
+        u_scan = u
     A = -model.A_log.float().exp()
-    state = reference_scan(u, delta, A, B, C)
+    state = reference_scan(u_scan, delta, A, B, C)
     gated = (state + model.D[None, :, None] * u) * F.silu(z)
     return F.linear(gated.transpose(1, 2), model.out_proj.weight, model.out_proj.bias)
 
@@ -202,19 +206,21 @@ class ContextWriteTest(unittest.TestCase):
 
     def test_context_neighbourhood_is_bounded_and_never_circular(self):
         model = self.make(retain_write=False)
-        x = self.inputs(frames=12)
-        reference = model.probe_components(x)['B_context']
-        perturbed = x.clone()
-        perturbed[:, 0] += 1.0
-        after = model.probe_components(perturbed)['B_context']
-        span = (3 - 1) // 2 + (5 - 1) // 2  # total reach of the two scales
-        self.assertFalse(torch.equal(reference[:, :, :span], after[:, :, :span]))
-        torch.testing.assert_close(reference[:, :, span:], after[:, :, span:])
+        torch.manual_seed(11)
+        u = torch.randn(2, model.d_inner, 12)
+        reference = model._context_residual(u)
+        span = max((conv.kernel_size[0] - 1) // 2 for conv in model.context_convs)
+        self.assertEqual(span, 2)
+        perturbed = u.clone()
+        perturbed[:, :, 0] += 1.0
+        after = model._context_residual(perturbed)
+        self.assertFalse(torch.equal(reference[:, :, :span + 1], after[:, :, :span + 1]))
+        torch.testing.assert_close(reference[:, :, span + 1:], after[:, :, span + 1:])
         # The last frame must not reach the first frames either.
-        perturbed = x.clone()
-        perturbed[:, -1] += 1.0
-        after = model.probe_components(perturbed)['B_context']
-        torch.testing.assert_close(reference[:, :, :12 - span], after[:, :, :12 - span])
+        perturbed = u.clone()
+        perturbed[:, :, -1] += 1.0
+        after = model._context_residual(perturbed)
+        torch.testing.assert_close(reference[:, :, :12 - span - 1], after[:, :, :12 - span - 1])
 
     def test_gains_stay_bounded_at_extreme_logits(self):
         model = self.make()
@@ -234,8 +240,7 @@ class ContextWriteTest(unittest.TestCase):
     def test_every_new_parameter_receives_a_finite_nonzero_task_gradient(self):
         model = self.make()
         x = self.inputs().requires_grad_(True)
-        target = torch.zeros(2, 12)
-        target[:, 3] = 1.0
+        target = torch.tensor([3, 5], dtype=torch.long)
         F.cross_entropy(model(x), target).backward()
         new_names = [name for name in dict(model.named_parameters())
                      if name.startswith(('context_', 'retain_', 'write_'))]
