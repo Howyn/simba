@@ -163,7 +163,8 @@ class ContextWriteMamba(Mamba):
             branches.append(conv(F.pad(hidden, (padding, padding))))
         fused = F.silu(self.context_fuse(
             rearrange(torch.cat(branches, dim=1), 'b (r k) l -> b l (r k)')))
-        return self.context_up(fused)
+        # (batch, frames, d_state) -> (batch, d_state, frames) to match B itself.
+        return rearrange(self.context_up(fused), 'b l n -> b n l')
 
     def _encode(self, hidden_states):
         if hidden_states.ndim != 3 or hidden_states.shape[-1] != self.d_model or hidden_states.shape[1] < 1:
