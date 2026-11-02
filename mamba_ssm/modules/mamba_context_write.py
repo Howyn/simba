@@ -162,7 +162,7 @@ class ContextWriteMamba(Mamba):
             padding = (conv.kernel_size[0] - 1) // 2
             branches.append(conv(F.pad(hidden, (padding, padding))))
         fused = F.silu(self.context_fuse(
-            rearrange(torch.cat(branches, dim=1), 'b (r k) l -> b l (r k)')))
+            rearrange(torch.cat(branches, dim=1), 'b c l -> b l c')))
         # (batch, frames, d_state) -> (batch, d_state, frames) to match B itself.
         return rearrange(self.context_up(fused), 'b l n -> b n l')
 

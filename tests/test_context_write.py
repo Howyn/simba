@@ -185,7 +185,7 @@ class ContextWriteTest(unittest.TestCase):
         retain, write = parts['retain'], parts['write']
         torch.testing.assert_close(retain, torch.full_like(retain, 0.5), atol=1e-6, rtol=0)
         torch.testing.assert_close(write, torch.ones_like(write), atol=1e-6, rtol=0)
-        expected = parts['retention_base'].pow(retain.double().view(1, -1, 1, 1))
+        expected = parts['retention_base'].double().pow(retain.double().view(1, -1, 1, 1)).float()
         torch.testing.assert_close(parts['retention'], expected, atol=1e-6, rtol=1e-6)
         torch.testing.assert_close(parts['u_write_scale'], write / retain, atol=1e-6, rtol=1e-6)
         self.assertTrue(bool((parts['delta_write'] <= parts['delta']).all()))

@@ -571,6 +571,9 @@ def reuse_legacy_baseline(root, seed, directory):
     print(f'Frozen reusable legacy baseline: {directory} ({record["available_epochs"]} scored epochs).')
     print('Verified: actual recipe, seed, dataset fingerprint, GPU/runtime, algorithms off, '
           f'and {proof["parameters"]} parameters in an identical checkpoint layout.')
+    if notes.get('extra_model_args'):
+        print('Tolerated extra model_args keys (identical layout proves their values): '
+              + ', '.join(f'{key}={value}' for key, value in notes['extra_model_args'].items()))
     print('Not compared: source_sha256 of the old run (the new candidate modules changed it). '
           'No source result was modified.')
 

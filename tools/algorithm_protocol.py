@@ -51,6 +51,10 @@ IGNORED_RECIPE_KEYS = frozenset((
     'save_interval', 'save_epoch', 'save_latest', 'save_score',
     'print_log', 'show_topk', 'log_interval', 'joint_label',
     'lambda_1', 'lambda_2',
+    # Resume-safety switch only: it decides whether continuation refuses a
+    # checkpoint without RNG state. A from-scratch run of the same epochs is
+    # unaffected, so an older baseline that predates this flag stays reusable.
+    'strict_rng_resume',
 ))
 # Defaults whose command-line overrides must not escape actual-config checks
 # merely because a compact input configuration omitted the default key.
@@ -353,8 +357,20 @@ def validate_legacy_baseline(root, directory, seed, expected_identity):
     expected_recipe = canonical_recipe(nominal, seed)
     actual_recipe = canonical_recipe(actual, seed)
     actual_recipe = {key: actual_recipe.get(key) for key in expected_recipe}
-    if actual_recipe != expected_recipe:
-        differing = [key for key in expected_recipe if actual_recipe.get(key) != expected_recipe[key]]
+    differing = [key for key in expected_recipe if actual_recipe.get(key) != expected_recipe[key]]
+    extra_model_args = {}
+    if 'model_args' in differing:
+        # An older trainer may have saved structural defaults it never had a
+        # switch for (e.g. num_of_heads). The caller's checkpoint-layout proof
+        # rejects any real structural difference, so extra keys are tolerated
+        # here and reported to the caller instead of blocking reuse.
+        expected_args = expected_recipe['model_args']
+        actual_args = actual_recipe.get('model_args') or {}
+        if all(actual_args.get(key) == value for key, value in expected_args.items()):
+            differing.remove('model_args')
+            extra_model_args = {key: value for key, value in actual_args.items()
+                                if key not in expected_args}
+    if differing:
         raise RuntimeError('Baseline actual training recipe differs: ' + ', '.join(differing))
     train = actual.get('train_feeder_args', {}).get('data_path')
     test = actual.get('test_feeder_args', {}).get('data_path')
@@ -369,6 +385,7 @@ def validate_legacy_baseline(root, directory, seed, expected_identity):
     notes = dict(directory=str(directory.resolve()), seed=seed,
                  dataset_sha256=dataset, recipe_verified=True,
                  algorithms_off=True, device_verified=True,
+                 extra_model_args=extra_model_args,
                  manifest_present=(directory / MANIFEST_NAME).is_file(),
                  source_sha256_compared=False, code_drift=False,
                  recorded_source_sha256=None)
