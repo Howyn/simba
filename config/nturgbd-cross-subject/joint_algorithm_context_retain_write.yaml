@@ -91,7 +91,7 @@
       5,
       7
     ],
-    "ssm_context_scale": 0.1,
+    "ssm_context_scale": 0.5,
     "ssm_retain_init": 0.5,
     "ssm_retain_floor": 0.25,
     "ssm_write_init": 1.0,
