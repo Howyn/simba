@@ -331,7 +331,9 @@ def validate_legacy_baseline(root, directory, seed, expected_identity):
     still decides comparability and reports what it could not compare:
 
     * the saved actual trainer configuration, with every algorithm flag off;
-    * seed, training recipe, dataset fingerprint and GPU/runtime identity;
+    * seed, training recipe and dataset fingerprint;
+    * the recorded GPU/runtime identity, but only when the old run stored one
+      in a manifest; otherwise the field says it was not compared;
     * an existing manifest, reporting ``code_drift`` instead of accepting it
       silently.
 
@@ -379,14 +381,20 @@ def validate_legacy_baseline(root, directory, seed, expected_identity):
     dataset = dataset_fingerprint(root, train)
     if dataset != expected.get('dataset_sha256'):
         raise RuntimeError('Baseline dataset fingerprint differs from the current dataset')
-    device = runtime_identity()
-    if device != expected.get('device'):
-        raise RuntimeError('Baseline GPU/runtime identity differs from the current device')
+    # GPU/runtime can only be compared when the old run recorded it. A run
+    # without a manifest never stored its device, and comparing the current
+    # device with itself (``expected`` is computed on this machine) would be a
+    # vacuous check that reads like a verification. Record what actually
+    # happened and leave the decision to the caller's report.
+    current_device = runtime_identity()
+    manifest_path = directory / MANIFEST_NAME
     notes = dict(directory=str(directory.resolve()), seed=seed,
                  dataset_sha256=dataset, recipe_verified=True,
-                 algorithms_off=True, device_verified=True,
-                 extra_model_args=extra_model_args,
-                 manifest_present=(directory / MANIFEST_NAME).is_file(),
+                 algorithms_off=True, extra_model_args=extra_model_args,
+                 current_device=current_device,
+                 device_compared=False, device_matches=None, recorded_device=None,
+                 device_verified=False,
+                 manifest_present=manifest_path.is_file(),
                  source_sha256_compared=False, code_drift=False,
                  recorded_source_sha256=None)
     if notes['manifest_present']:
@@ -396,6 +404,12 @@ def validate_legacy_baseline(root, directory, seed, expected_identity):
             notes['source_sha256_compared'] = True
         else:
             notes['code_drift'] = True
+        recorded_device = record.get('device')
+        if isinstance(recorded_device, dict):
+            notes['recorded_device'] = recorded_device
+            notes['device_compared'] = True
+            notes['device_matches'] = recorded_device == current_device
+            notes['device_verified'] = bool(notes['device_matches'])
     return notes
 
 

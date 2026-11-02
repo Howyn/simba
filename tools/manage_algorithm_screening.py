@@ -543,9 +543,10 @@ def reuse_legacy_baseline(root, seed, directory):
 
     Adding the context/retain modules changes every mode's source fingerprint,
     which would otherwise force a redundant baseline retrain. Reuse is allowed
-    only after proving the saved actual recipe, dataset, device and the
-    checkpoint's parameter layout still match the current baseline network. The
-    reference records exactly what was and was not compared.
+    only after proving the saved actual recipe, the dataset and the checkpoint's
+    parameter layout still match the current baseline network; the GPU/runtime is
+    compared only when the old run recorded it. The reference records exactly
+    what was and was not compared.
     """
     directory = directory.resolve()
     if legacy.manager_alive(legacy.read_state(queue_dir(root, seed))) or legacy.training_processes(root):
@@ -575,11 +576,22 @@ def reuse_legacy_baseline(root, seed, directory):
     (queue / 'baseline_reference.json').write_text(json.dumps(record, indent=2, ensure_ascii=False),
                                                    encoding='utf-8')
     print(f'Frozen reusable legacy baseline: {directory} ({record["available_epochs"]} scored epochs).')
-    print('Verified: actual recipe, seed, dataset fingerprint, GPU/runtime, algorithms off, '
+    print('Verified: actual recipe, seed, dataset fingerprint, algorithms off, '
           f'and {proof["parameters"]} parameters in an identical checkpoint layout.')
     if notes.get('extra_model_args'):
         print('Tolerated extra model_args keys (identical layout proves their values): '
               + ', '.join(f'{key}={value}' for key, value in notes['extra_model_args'].items()))
+    current = (notes.get('current_device') or {}).get('name')
+    if notes.get('device_compared') and notes.get('device_matches'):
+        print(f'GPU/runtime: matches the device recorded by the old run ({current}).')
+    elif notes.get('device_compared'):
+        recorded = (notes.get('recorded_device') or {}).get('name')
+        print(f'GPU/runtime: WARNING the old run recorded {recorded} but this machine is {current}. '
+              'Data, recipe and seed still match, so the accuracy comparison stays usable, but '
+              'strict same-device comparability and timing comparisons are not met.')
+    else:
+        print('GPU/runtime: NOT compared (the old run has no manifest recording its device); '
+              f'this run uses {current}.')
     print('Not compared: source_sha256 of the old run (the new candidate modules changed it). '
           'No source result was modified.')
 
@@ -905,7 +917,13 @@ def main():
         elif args.command == 'status':
             state = legacy.read_state(queue_dir(ROOT, args.seed))
             print(json.dumps(dict(state, manager_alive=legacy.manager_alive(state)), ensure_ascii=False, indent=2))
-            show_results(ROOT, args.seed)
+            stage_active = (state.get('target') == 5
+                            or any(group_dir(ROOT, mode, args.seed).exists() for mode in CONTEXT_MODES))
+            if stage_active:
+                print('--- five-epoch context/retain stage (status shows this stage; use results for the older screen) ---')
+                show_stage_results(ROOT, args.seed)
+            else:
+                show_results(ROOT, args.seed)
         elif args.command == 'results':
             show_results(ROOT, args.seed, args.json)
         elif args.command == 'results5':

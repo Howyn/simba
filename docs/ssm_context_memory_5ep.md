@@ -103,15 +103,19 @@ python -m unittest discover -s tests -p "test_algorithm_*.py"
 
 ### 4.2 复用已有基线（关键，省 5 轮）
 
-新模块会让所有模式的源码指纹变化，严格 manifest 校验会拒绝旧基线。`reuse-legacy-baseline` 用**可证明的替代核验**放行，并把你确认为真的项目写进 `baseline_reference.json`：
+新模块会让所有模式的源码指纹变化，严格 manifest 校验会拒绝旧基线。`reuse-legacy-baseline` 用**可证明的替代核验**放行，并把实际核验到的项目写进 `baseline_reference.json`：
 
 - 旧目录 `config.yaml` 的实际配方、seed、数据路径一致；
 - 数据 NPZ 指纹一致；
-- GPU 型号 / torch / CUDA 身份一致；
 - 所有算法开关为**空**（确认它就是原 Simba）；
 - 旧 checkpoint 的参数**名字与形状**与当前代码构造的原版网络**完全一致**（`tools/verify_baseline_architecture.py`）。
 
-未被比较的是旧运行的源码指纹（因为新增模块必然改变它），这一点会打印在记录里，不会假装比过。
+未被比较的两项，会打印在记录里，不会假装比过：
+
+1. **旧运行的源码指纹**——新增模块必然改变它；
+2. **GPU/运行时身份**——只有当旧运行留下 `run_manifest.json` 记录了设备时才能真正比对。早期运行（如 `full_baseline_20ep`）没有 manifest，此时记录 `device_compared=false`，含义是“未比较”，不是“已验证”。早期版本的核验代码在这里把“当前 GPU 与当前 GPU 比”当成了通过，属于空洞核验，已修正；已冻结的旧参考记录需要重新执行一次本命令才会更新为如实标注。
+
+2026-11-02 这一轮的实际设备是 **RTX 3080 Ti（12 GB）**，不是 4090。旧基线若是在 4090 上训练的，则“同 GPU 型号”这一条**不成立**：数据、配方、seed 仍然一致，准确率对比可用，但耗时不可横比，浮点层面的低层差异也不可排除。
 
 ```bash
 # 用你实际存在的目录，二选一
@@ -146,6 +150,10 @@ bash run_context_stage.sh start5 --modes context_write retain_write context_reta
 # 只想先投两个，或某一组还没通过检查
 bash run_context_stage.sh start5 --modes context_write context_retain_write
 ```
+
+**运行期间不要 `git pull`**：队列在每组开始前会重算源码/配置/数据指纹，拉取新代码会让它与启动时的身份不一致，队列会在当前组结束后停下（这是刻意设计，避免新旧代码混跑）。要更新代码，等队列跑完再拉。
+
+顺序只看“万一中断先拿到什么”：把信号最强的放前面（如 `context_retain_write retain_write context_write`）。重复执行同一条命令是安全的：已完成的组会跳过，未完成的组从自己的 `runs-latest.pt` 续跑。
 
 后台顺序执行，SSH 断开不中断（关机/释放实例会中断）。同一 GPU 上不要与旧队列同时开。
 
