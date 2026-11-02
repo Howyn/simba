@@ -112,6 +112,8 @@ def epoch_saving(epoch, model, optimizer, filename, *, global_step=None,
                     'best_accuracy': None if best_accuracy is None else float(best_accuracy),
                     'best_epoch': None if best_epoch is None else int(best_epoch),
                     }
+    from tools.training_rng import capture_rng_state
+    checkpoint['rng_state'] = capture_rng_state()
     # A failed write must not destroy the preceding good checkpoint.
     descriptor, temporary = tempfile.mkstemp(
         prefix=os.path.basename(filename) + '.', suffix='.tmp',
@@ -324,6 +326,8 @@ def get_parser():
                         help='atomically save runs-latest.pt after each evaluated epoch for recovery')
     parser.add_argument('--ssm-protect-addons', type=str2bool, default=False,
                         help='exclude only new SSM direction/motion/B-C normalization parameters from SGD weight decay')
+    parser.add_argument('--strict-rng-resume', type=str2bool, default=False,
+                        help='require a full RNG snapshot when resuming the new screening protocol')
 
     return parser
 
@@ -520,6 +524,9 @@ class Processor():
                 self.global_step = checkpoint['global_step']
             self._resume_best_accuracy = checkpoint.get('best_accuracy')
             self._resume_best_epoch = checkpoint.get('best_epoch')
+            self._resume_rng_state = checkpoint.get('rng_state')
+            if self.arg.strict_rng_resume and self._resume_rng_state is None:
+                raise ValueError('This protocol requires RNG state in runs-latest.pt; legacy checkpoints cannot be strictly resumed')
             try:
                 self.model.load_state_dict(weights)
             except:
@@ -550,6 +557,9 @@ class Processor():
                     self.print_log('Optimizer group {}: {} parameters, weight decay {}.'.format(
                         group['group_name'], sum(p.numel() for p in group['params']),
                         group['weight_decay']))
+            else:
+                from tools.ssm_optimizer import algorithm_parameter_groups
+                parameters = algorithm_parameter_groups(self.model, self.arg.weight_decay)
             self.optimizer = optim.SGD(
                 parameters,
                 lr=self.arg.base_lr,
@@ -978,6 +988,10 @@ class Processor():
                            'step {}, decay {}.'.format(
                                self.arg.warm_up_epoch, self.arg.base_lr,
                                self.arg.step, self.arg.lr_decay_rate))
+            if self.arg.resume and getattr(self, '_resume_rng_state', None) is not None:
+                from tools.training_rng import restore_rng_state
+                restore_rng_state(self._resume_rng_state)
+                self.print_log('Restored Python, NumPy, Torch and CUDA RNG state at the epoch boundary.')
             for epoch in range(self.arg.start_epoch, self.arg.num_epoch):
                 # Always save the final epoch so short smoke runs (for example,
                 # num_epoch=1 with the default save_epoch=10) still produce a

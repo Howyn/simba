@@ -17,10 +17,24 @@ class MambaBlock(nn.Module):
     def __init__(self, embed_dim, dropout_level=0, bidirectional=False,
                  motion_delta=False, motion_rank=16, motion_scale=0.1,
                  bidir_init=0.1, bc_norm=False, bc_norm_gain=0.1,
-                 bc_norm_bias=0.1, bc_norm_eps=1e-6):
+                 bc_norm_bias=0.1, bc_norm_eps=1e-6,
+                 joint_state=False, num_joints=25, joint_state_weight=0.1,
+                 dual_scale=False, slow_scale=0.5, scale_gate_init=0.1):
         super().__init__()
+        import math
+        if (joint_state or dual_scale) and (bidirectional or motion_delta or bc_norm):
+            raise ValueError('New algorithm candidates must run independently of old SSM variants')
+        if joint_state and dual_scale:
+            raise ValueError('Screen joint_state and dual_scale separately before combining candidates')
+        if not math.isfinite(joint_state_weight) or joint_state_weight <= 0:
+            raise ValueError('joint_state_weight must be finite and positive')
 
-        if bidirectional or motion_delta or bc_norm:
+        if dual_scale:
+            from mamba_ssm.modules.mamba_dual_scale import DualScaleMamba
+            self.mamba = DualScaleMamba(d_model=embed_dim, d_state=16, d_conv=4,
+                                       expand=2, slow_scale=slow_scale,
+                                       gate_init=scale_gate_init)
+        elif bidirectional or motion_delta or bc_norm:
             from mamba_ssm.modules.mamba_skeleton import SkeletonMamba
             self.mamba = SkeletonMamba(
                 d_model=embed_dim, d_state=16, d_conv=4, expand=2,
@@ -33,11 +47,23 @@ class MambaBlock(nn.Module):
         else:
             # Keep the existing baseline implementation, state keys and RNG.
             self.mamba = Mamba(d_model=embed_dim, d_state=16, d_conv=4, expand=2)
+        self.joint_state = None
+        self.joint_state_enabled = True
+        self.joint_state_weight = float(joint_state_weight)
+        if joint_state:
+            if embed_dim % num_joints:
+                raise ValueError('embed_dim must be divisible by num_joints')
+            from mamba_ssm.modules.mamba_joint_state import JointStateMamba
+            self.joint_state = JointStateMamba(num_joints=num_joints,
+                                              joint_channels=embed_dim // num_joints)
         self.norm = RMSNorm(embed_dim) #nn.LayerNorm(embed_dim)
         self.dropout = nn.Dropout(dropout_level)
 
     def forward(self, x):
-        x = self.norm(self.mamba(x) + x)
+        result = self.mamba(x)
+        if self.joint_state is not None and self.joint_state_enabled:
+            result = result + self.joint_state_weight * self.joint_state(x)
+        x = self.norm(result + x)
         return self.dropout(x)
 
 

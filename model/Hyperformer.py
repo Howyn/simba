@@ -644,6 +644,9 @@ class Model(nn.Module):
                  ssm_motion_rank=16, ssm_motion_scale=0.1, ssm_bidir_init=0.1,
                  ssm_bc_norm_layers=None, ssm_bc_norm_gain=0.1,
                  ssm_bc_norm_bias=0.1, ssm_bc_norm_eps=1e-6,
+                 ssm_joint_state_layers=None, ssm_joint_state_weight=0.1,
+                 ssm_dual_scale_layers=None, ssm_slow_scale=0.5,
+                 ssm_scale_gate_init=0.1,
                  **kwargs):
         super(Model, self).__init__()
 
@@ -677,6 +680,14 @@ class Model(nn.Module):
         self.ssm_bidir_layers = validate_ssm_layers(ssm_bidir_layers, 'ssm_bidir_layers')
         self.ssm_motion_layers = validate_ssm_layers(ssm_motion_layers, 'ssm_motion_layers')
         self.ssm_bc_norm_layers = validate_ssm_layers(ssm_bc_norm_layers, 'ssm_bc_norm_layers')
+        self.ssm_joint_state_layers = validate_ssm_layers(ssm_joint_state_layers, 'ssm_joint_state_layers')
+        self.ssm_dual_scale_layers = validate_ssm_layers(ssm_dual_scale_layers, 'ssm_dual_scale_layers')
+        if self.ssm_joint_state_layers and self.ssm_dual_scale_layers:
+            raise ValueError('Initial algorithm screening runs one new candidate at a time')
+        if (self.ssm_joint_state_layers or self.ssm_dual_scale_layers) and (
+                ctr_layers or fr_layers or self.ssm_bidir_layers or self.ssm_motion_layers
+                or self.ssm_bc_norm_layers):
+            raise ValueError('New algorithm screening must disable CTR, FR and earlier SSM variants')
 
         def ssm_args_for(layer):
             return dict(bidirectional=layer in self.ssm_bidir_layers,
@@ -685,7 +696,11 @@ class Model(nn.Module):
                         bidir_init=ssm_bidir_init,
                         bc_norm=layer in self.ssm_bc_norm_layers,
                         bc_norm_gain=ssm_bc_norm_gain, bc_norm_bias=ssm_bc_norm_bias,
-                        bc_norm_eps=ssm_bc_norm_eps)
+                        bc_norm_eps=ssm_bc_norm_eps,
+                        joint_state=layer in self.ssm_joint_state_layers,
+                        num_joints=num_point, joint_state_weight=ssm_joint_state_weight,
+                        dual_scale=layer in self.ssm_dual_scale_layers,
+                        slow_scale=ssm_slow_scale, scale_gate_init=ssm_scale_gate_init)
 
 
         self.l1 = TCN_ViT_unit(3, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=1, use_ctr=1 in ctr_layers, ssm_args=ssm_args_for(1))

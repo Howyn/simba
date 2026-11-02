@@ -38,3 +38,20 @@ def optimizer_parameter_groups(model, weight_decay, protect_ssm_addons=False):
         groups.append(dict(params=backbone, weight_decay=decay, group_name='backbone'))
     groups.append(dict(params=addons, weight_decay=0.0, group_name='ssm_addons'))
     return groups
+
+
+def algorithm_parameter_groups(model, weight_decay):
+    """Protect only the new dual-scale mixing logit, preserving backbone decay.
+
+    A sigmoid mixing bias decaying to zero would drift towards a 50/50 mix
+    even with zero task gradient. No other existing Mamba parameter changes
+    optimizer rules. The baseline still returns its original iterator.
+    """
+    regular, gates = [], []
+    for name, parameter in model.named_parameters():
+        target = gates if name.endswith('.mamba.mamba.dual_scale_logit') else regular
+        target.append(parameter)
+    if not gates:
+        return model.parameters()
+    return [dict(params=regular, weight_decay=float(weight_decay), group_name='backbone'),
+            dict(params=gates, weight_decay=0.0, group_name='algorithm_scale_gate')]
