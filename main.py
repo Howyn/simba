@@ -164,7 +164,7 @@ def get_parser():
     parser.add_argument('-model_saved_name', default='')
     parser.add_argument(
         '--config',
-        default='./config/nturgbd-cross-view/test_bone.yaml',
+        default='./config/nturgbd-cross-subject/joint_autodl.yaml',
         help='path to the configuration file')
 
     # processor
@@ -324,8 +324,6 @@ def get_parser():
     parser.add_argument('--warm_up_epoch', type=int, default=0)
     parser.add_argument('--save-latest', type=str2bool, default=False,
                         help='atomically save runs-latest.pt after each evaluated epoch for recovery')
-    parser.add_argument('--ssm-protect-addons', type=str2bool, default=False,
-                        help='exclude only new SSM direction/motion/B-C normalization parameters from SGD weight decay')
     parser.add_argument('--strict-rng-resume', type=str2bool, default=False,
                         help='require a full RNG snapshot when resuming the new screening protocol')
 
@@ -343,8 +341,6 @@ class Processor():
             raise ValueError('log-interval must be at least 1')
         if arg.num_worker < 0 or arg.prefetch_factor < 1:
             raise ValueError('num-worker must be non-negative and prefetch-factor positive')
-        if arg.ssm_protect_addons and arg.optimizer != 'SGD':
-            raise ValueError('ssm-protect-addons is currently supported with SGD only')
         if arg.tf32 is not None:
             torch.backends.cuda.matmul.allow_tf32 = arg.tf32
             torch.backends.cudnn.allow_tf32 = arg.tf32
@@ -375,11 +371,6 @@ class Processor():
         self.global_step = 0
         # pdb.set_trace()
         self.load_model()
-        self.use_fr_head = getattr(self.model, 'fr_head', None) is not None
-        if self.use_fr_head and isinstance(self.arg.device, list) and len(self.arg.device) > 1:
-            raise ValueError('FR-Head prototype updates currently support one GPU only')
-        if self.use_fr_head and self.arg.ema:
-            raise ValueError('FR-Head prototype buffers are not supported with model EMA')
         self.model = self.model.cuda(self.output_device)
         if self.arg.phase == 'model_size':
             pass
@@ -548,20 +539,8 @@ class Processor():
             # params = [i[1] for i in params]
             # base_params = [i[1] for i in base_params]
 
-            parameters = self.model.parameters()
-            if self.arg.ssm_protect_addons:
-                from tools.ssm_optimizer import optimizer_parameter_groups
-                parameters = optimizer_parameter_groups(
-                    self.model, self.arg.weight_decay, protect_ssm_addons=True)
-                for group in parameters:
-                    self.print_log('Optimizer group {}: {} parameters, weight decay {}.'.format(
-                        group['group_name'], sum(p.numel() for p in group['params']),
-                        group['weight_decay']))
-            else:
-                from tools.ssm_optimizer import algorithm_parameter_groups
-                parameters = algorithm_parameter_groups(self.model, self.arg.weight_decay)
             self.optimizer = optim.SGD(
-                parameters,
+                self.model.parameters(),
                 lr=self.arg.base_lr,
                 momentum=self.arg.momentum,
                 nesterov=self.arg.nesterov,
@@ -591,9 +570,7 @@ class Processor():
             checkpoint = torch.load(self.arg.resume, map_location=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"))
             saved_groups = checkpoint['optimizer_state_dict']['param_groups']
             if len(saved_groups) != len(self.optimizer.param_groups):
-                raise ValueError('Optimizer groups differ from the checkpoint. '
-                                 'Do not resume an old unprotected run with ssm-protect-addons enabled; '
-                                 'use a separate directory and a fresh run for that comparison.')
+                raise ValueError('Optimizer groups differ from the checkpoint.')
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             self.print_log('Loaded optimizer from epoch: {} !'.format(self.arg.start_epoch -1))
 
@@ -739,7 +716,7 @@ class Processor():
                 # loss = lambda_2* mmd_loss + lambda_1* l2_z_mean + loss
             # With FR enabled the model returns the weighted auxiliary loss as
             # its second output. Baseline models keep returning the old value.
-            loss2 = z if self.use_fr_head else torch.zeros_like(loss)
+            loss2 = torch.zeros_like(loss)
 
 
 

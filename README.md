@@ -1,186 +1,46 @@
-# Simba <img src="assets/blue_lion.png" alt="Lion Logo" width="40" height="40">
-This is the official implementation of our paper [Simba: Mamba augmented U-ShiftGCN for Skeletal Action Recognition in Videos](https://arxiv.org/abs/2404.07645). To the best of our knowledge, this is the first skeleton action recognition model based on Mamba augmentation with GCN. 
+# Simba: NTU RGB+D 60 X-Sub Joint baseline
 
-## News
+This repository contains the NTU60 cross-subject joint-stream baseline for [Simba](https://arxiv.org/abs/2404.07645). The optional experimental architectures and other dataset configurations have been removed. The baseline retains the NTU joint-dimension fix and the existing AutoDL training settings.
 
-- [ ] Make pre-trained models available.
-- [ ] This repo borrows inspiration from multiple codebases. Therefore, some files are redundant. Working towards cleaning the repo !
-- [x] Make the code available.
+## Environment
 
-## Simba architecture
-<p align="center">
-   <img src="model_final_3.png" alt="drawing" width="800"/>
-</p>
+Use Linux with an NVIDIA GPU, a compatible CUDA toolkit and PyTorch installation. On an AutoDL instance with PyTorch already installed:
 
-# Preparation
-### Install torchlight
-Run `pip install -e torchlight`
-### Install dependencies
-```
-pip install -r requirements.txt
+```bash
+python -m pip install -r requirements-autodl.txt
+python -m pip install -e . --no-build-isolation
 ```
 
-### Download datasets.
+The editable install builds or obtains the Mamba selective-scan CUDA extension. The PyTorch, CUDA, Triton and causal-conv1d versions must be compatible. The dataset and checkpoints are not included in Git.
 
-#### There are 3 datasets to download:
+## Data
 
-- NTU RGB+D 60 Skeleton
-- NTU RGB+D 120 Skeleton
-- NW-UCLA
+Obtain the NTU RGB+D 60 skeleton data from the [dataset provider](https://rose1.ntu.edu.sg/dataset/actionRecognition/). Extract `nturgbd_skeletons_s001_to_s017.zip` under `/root/autodl-tmp/ntu60/nturgbd_raw` and prepare the X-Sub split:
 
-#### NTU RGB+D 60 and 120
-
-1. Request dataset here: https://rose1.ntu.edu.sg/dataset/actionRecognition
-2. Download the skeleton-only datasets:
-   1. `nturgbd_skeletons_s001_to_s017.zip` (NTU RGB+D 60)
-   2. `nturgbd_skeletons_s018_to_s032.zip` (NTU RGB+D 120)
-   3. Extract above files to `./data/nturgbd_raw`
-
-#### NW-UCLA
-
-1. Download dataset from [CTR-GCN](https://github.com/Uason-Chen/CTR-GCN)
-2. Move `all_sqe` to `./data/NW-UCLA`
-
-### Data Processing
-
-#### Directory Structure
-
-Put downloaded data into the following directory structure:
-
-```
-- data/
-  - NW-UCLA/
-    - all_sqe
-      ... # raw data of NW-UCLA
-  - ntu/
-  - ntu120/
-  - nturgbd_raw/
-    - nturgb+d_skeletons/     # from `nturgbd_skeletons_s001_to_s017.zip`
-      ...
-    - nturgb+d_skeletons120/  # from `nturgbd_skeletons_s018_to_s032.zip`
-      ...
+```bash
+python tools/prepare_ntu60_xsub.py
 ```
 
-#### Generating Data
+The default output is `/root/autodl-tmp/ntu60/ntu/NTU60_CS.npz`. See `python tools/prepare_ntu60_xsub.py --help` for alternative paths, and update both `data_path` entries in `config/nturgbd-cross-subject/joint_autodl.yaml` if needed.
 
-- Generate NTU RGB+D 60 or NTU RGB+D 120 dataset:
+## Training and evaluation
 
-```
- cd ./data/ntu # or cd ./data/ntu120
- # Get skeleton of each performer
- python get_raw_skes_data.py
- # Remove the bad skeleton 
- python get_raw_denoised_data.py
- # Transform the skeleton to the center of the first frame
- python seq_transformation.py
-```
-
-# Evaluation
-
-```
-bash evaluate.sh
-```
-Replace path_to_model_weights argument to the saved model weights you obtain after training.
-# Training & Testing
-
-### Internal SSM experiments (NTU60 X-Sub Joint)
-
-The optional `ssm_bidir`, `ssm_motion`, and `ssm_bidir_motion` modes add shared-encoder bidirectional state scans and/or motion-conditioned delta inside Mamba. See [the AutoDL 10-epoch experiment guide](docs/ssm_experiments.md) for GPU checks, ablations, and commands. Existing baseline configurations retain the original Mamba path.
-
-The current round modifies the l4 state update itself: a multi-scale context write (`ssm_context_layers`) plus decoupled retain/write gains (`ssm_retain_layers`), either separately or together. It runs a five-epoch screen against a reusable baseline and extends only the pre-registered winner to ten epochs. See [the five-epoch context/retain guide](docs/ssm_context_memory_5ep.md); start with `python -m unittest discover -s tests -p "test_context_*.py"`, then `python tools/check_algorithm_signal.py context_retain_write`, then `bash run_context_stage.sh start5 --modes context_write retain_write context_retain_write`.
-
-For the budget-limited 20-epoch comparison, including detached background runs, checkpoint recovery, live logs, and a four-group result summary, see [the 20-epoch experiment guide](docs/ssm_full_experiments.md). Run the baseline and combined model first with `bash run_full_experiments.sh start --modes baseline ssm_bidir_motion`.
-
-For the single-candidate 10-epoch B/C normalization trial, see [the B/C Norm guide](docs/bc_norm_10ep.md). After the CUDA checks, use `bash run_bc_experiment.sh start`; `results` compares against only the first 10 epochs of the existing baseline run.
-
-### Training
-
-```
+```bash
 bash train.sh
+bash test.sh /path/to/checkpoint.pt
 ```
 
-Please check the configuration in the config directory.
+The configuration uses seed 4321, 64 frames, batch size 16, 50 epochs and GPU 0. Adjust the config for your hardware. Training outputs are written to `work_dir/ntu60/xsub/simba_joint/`. Additional arguments passed to `train.sh` are forwarded to `main.py`. For a quick check, run `bash train.sh --num-epoch 1` before starting the full experiment.
 
-### Testing
+## Acknowledgements and citation
 
-```
-bash evaluate.sh
-```
+Simba builds on [Hyperformer](https://github.com/ZhouYuxuanYX/Hyperformer), [Mamba](https://github.com/state-spaces/mamba) and [Shift-GCN](https://github.com/kchengiva/Shift-GCN).
 
-To ensemble the results of different modalities, run the following command:
-
-```
-bash ensemble.sh
-```
-
-## Acknowledgements
-
-This repo is based on [Hyperformer](https://github.com/ZhouYuxuanYX/Hyperformer), [Mamba](https://github.com/state-spaces/mamba) and [Shift-GCN](https://github.com/kchengiva/Shift-GCN).
-
-Thanks to the original authors for their work!
-
-## Citation
-
-Please cite this work if you find it useful:
-````BibTeX
+```bibtex
 @article{chaudhuri2024simba,
   title={Simba: Mamba augmented U-ShiftGCN for Skeletal Action Recognition in Videos},
   author={Chaudhuri, Soumyabrata and Bhattacharya, Saumik},
   journal={arXiv preprint arXiv:2404.07645},
   year={2024}
 }
-````
-
-# Contact
-For any questions, feel free to raise an issue !
-
-## AutoDL: NTU RGB+D 60 X-Sub joint
-
-The repository includes a single-GPU configuration at
-`config/nturgbd-cross-subject/joint_autodl.yaml`. It reads the processed
-dataset from `/root/autodl-tmp/ntu60/ntu/NTU60_CS.npz`, so the raw archive and the
-large generated data file stay outside the Git repository.
-
-On an Ubuntu AutoDL instance, run:
-
-```bash
-cd /root/autodl-tmp
-git clone git@github.com:Howyn/simba.git Simba-main
-cd Simba-main
-python3 -m venv --system-site-packages .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-python -m pip install -r requirements-autodl.txt
-python -m pip install -e . --no-build-isolation
-python -m pip install -e torchlight
 ```
-
-Extract the NTU archive outside the project and generate the NPZ file:
-
-```bash
-mkdir -p /root/autodl-tmp/ntu60/nturgbd_raw
-unzip /root/autodl-tmp/nturgbd_skeletons_s001_to_s017.zip -d /root/autodl-tmp/ntu60/nturgbd_raw
-python tools/prepare_ntu60_xsub.py
-```
-
-The converter prints the train and test shapes. They should be compatible
-with `feeders.feeder_ntu.Feeder` and the output should exist at
-`/root/autodl-tmp/ntu60/ntu/NTU60_CS.npz`.
-
-Run a one-epoch smoke test first by temporarily changing `num_epoch` to `1`
-in the AutoDL config, then restore it to `50` for the experiment:
-
-```bash
-screen -S simba
-bash train.sh
-# Ctrl-A, D to detach; reattach later with: screen -r simba
-```
-
-The RTX 4090 uses GPU `0`. Checkpoints and logs are written under
-`work_dir/ntu60/xsub/simba_joint/`. To evaluate a checkpoint:
-
-```bash
-bash test.sh work_dir/ntu60/xsub/simba_joint/runs-50-*.pt
-```
-

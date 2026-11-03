@@ -6,8 +6,6 @@ import numpy as np
 # from mamba_ssm import Mamba
 from mamba_blocks import MambaBlock
 from layers import GraphConvolution, Shift_gcn #unit_gcn
-from model.ctr_gc import CTRGCUnit
-from model.fr_head import MultiLevelFRHead
 # from ctrgcn import unit_gcn
 from graph.tools import normalize_digraph
 from shiftgcn_model.shift_gcn import Shift_tcn
@@ -450,14 +448,13 @@ class unit_vit(nn.Module):
         return x
 
 class TCN_ViT_unit(nn.Module):
-    def __init__(self, in_channels, out_channels, A, stride=1, num_of_heads=6, residual=True, kernel_size=5, dilations=[1,2], pe=False, num_point=25, layer=0, use_ctr=False, ssm_args=None):
+    def __init__(self, in_channels, out_channels, A, stride=1, num_of_heads=6, residual=True, kernel_size=5, dilations=[1,2], pe=False, num_point=25, layer=0):
         super(TCN_ViT_unit, self).__init__()
         # Flattened joint/channel features are fed to Mamba.  500 only
         # matches UCLA's 20 joints x 25 channels; NTU uses 25 joints.
-        self.mamba = MambaBlock(embed_dim=num_point * 25, **(ssm_args or {}))
+        self.mamba = MambaBlock(embed_dim=num_point * 25)
         # self.mamba_2 = MambaBlock(embed_dim=512)
-        self.shift_gcn = (CTRGCUnit(in_channels, out_channels, A) if use_ctr
-                          else Shift_gcn(in_channels, out_channels, A))
+        self.shift_gcn = Shift_gcn(in_channels,out_channels,A)
         self.shift_gcn_2 = Shift_gcn(out_channels,108,A).to('cuda')
         self.shift_gcn_3 = Shift_gcn(108,54,A).to('cuda') 
         self.shift_gcn_4 = Shift_gcn(54,25,A).to('cuda')
@@ -637,22 +634,7 @@ class TCN_ViT_unit(nn.Module):
 
 class Model(nn.Module):
     def __init__(self, num_class=400, num_point=18, num_person=2, graph=None, graph_args=dict(), in_channels=3,
-                 drop_out=0, num_of_heads=9, joint_label=[], ctr_layers=None,
-                 fr_layers=None, fr_layer_weights=None, fr_loss_weight=0.1,
-                 fr_hidden_channels=256, fr_input_frames=64,
-                 ssm_bidir_layers=None, ssm_motion_layers=None,
-                 ssm_motion_rank=16, ssm_motion_scale=0.1, ssm_bidir_init=0.1,
-                 ssm_bc_norm_layers=None, ssm_bc_norm_gain=0.1,
-                 ssm_bc_norm_bias=0.1, ssm_bc_norm_eps=1e-6,
-                 ssm_joint_state_layers=None, ssm_joint_state_weight=0.1,
-                 ssm_dual_scale_layers=None, ssm_slow_scale=0.5,
-                 ssm_scale_gate_init=0.1,
-                 ssm_context_layers=None, ssm_retain_layers=None,
-                 ssm_context_rank=16, ssm_context_kernels=(3, 5, 7),
-                 ssm_context_scale=0.1, ssm_retain_init=0.5,
-                 ssm_retain_floor=0.25, ssm_write_init=1.0,
-                 ssm_write_max=2.0,
-                 **kwargs):
+                 drop_out=0, num_of_heads=9, joint_label=[], **kwargs):
         super(Model, self).__init__()
 
         if graph is None:
@@ -670,72 +652,19 @@ class Model(nn.Module):
         self.data_bn = nn.BatchNorm1d(num_person * in_channels * num_point)
         self.joint_label = joint_label
 
-        ctr_layers = tuple(ctr_layers) if ctr_layers is not None else ()
-        if any(not isinstance(layer, int) or isinstance(layer, bool) or layer not in range(1, 11)
-               for layer in ctr_layers) or len(set(ctr_layers)) != len(ctr_layers):
-            raise ValueError("ctr_layers must contain unique layer numbers from 1 to 10")
 
-        def validate_ssm_layers(values, name):
-            values = tuple(values) if values is not None else ()
-            if any(not isinstance(value, int) or isinstance(value, bool) or value not in range(1, 11)
-                   for value in values) or len(set(values)) != len(values):
-                raise ValueError(name + ' must contain unique layer numbers from 1 to 10')
-            return values
-
-        self.ssm_bidir_layers = validate_ssm_layers(ssm_bidir_layers, 'ssm_bidir_layers')
-        self.ssm_motion_layers = validate_ssm_layers(ssm_motion_layers, 'ssm_motion_layers')
-        self.ssm_bc_norm_layers = validate_ssm_layers(ssm_bc_norm_layers, 'ssm_bc_norm_layers')
-        self.ssm_joint_state_layers = validate_ssm_layers(ssm_joint_state_layers, 'ssm_joint_state_layers')
-        self.ssm_dual_scale_layers = validate_ssm_layers(ssm_dual_scale_layers, 'ssm_dual_scale_layers')
-        self.ssm_context_layers = validate_ssm_layers(ssm_context_layers, 'ssm_context_layers')
-        self.ssm_retain_layers = validate_ssm_layers(ssm_retain_layers, 'ssm_retain_layers')
-        if self.ssm_joint_state_layers and self.ssm_dual_scale_layers:
-            raise ValueError('Initial algorithm screening runs one new candidate at a time')
-        if (self.ssm_joint_state_layers or self.ssm_dual_scale_layers) and (
-                ctr_layers or fr_layers or self.ssm_bidir_layers or self.ssm_motion_layers
-                or self.ssm_bc_norm_layers):
-            raise ValueError('New algorithm screening must disable CTR, FR and earlier SSM variants')
-        if (self.ssm_context_layers or self.ssm_retain_layers) and (
-                ctr_layers or fr_layers or self.ssm_bidir_layers or self.ssm_motion_layers
-                or self.ssm_bc_norm_layers or self.ssm_joint_state_layers
-                or self.ssm_dual_scale_layers):
-            raise ValueError('Context/retain screening must disable CTR, FR and every earlier SSM variant')
-
-        def ssm_args_for(layer):
-            return dict(bidirectional=layer in self.ssm_bidir_layers,
-                        motion_delta=layer in self.ssm_motion_layers,
-                        motion_rank=ssm_motion_rank, motion_scale=ssm_motion_scale,
-                        bidir_init=ssm_bidir_init,
-                        bc_norm=layer in self.ssm_bc_norm_layers,
-                        bc_norm_gain=ssm_bc_norm_gain, bc_norm_bias=ssm_bc_norm_bias,
-                        bc_norm_eps=ssm_bc_norm_eps,
-                        joint_state=layer in self.ssm_joint_state_layers,
-                        num_joints=num_point, joint_state_weight=ssm_joint_state_weight,
-                        dual_scale=layer in self.ssm_dual_scale_layers,
-                        slow_scale=ssm_slow_scale, scale_gate_init=ssm_scale_gate_init,
-                        context_write=layer in self.ssm_context_layers,
-                        retain_write=layer in self.ssm_retain_layers,
-                        context_rank=ssm_context_rank,
-                        context_kernels=ssm_context_kernels,
-                        context_scale=ssm_context_scale,
-                        retain_init=ssm_retain_init,
-                        retain_floor=ssm_retain_floor,
-                        write_init=ssm_write_init,
-                        write_max=ssm_write_max)
-
-
-        self.l1 = TCN_ViT_unit(3, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=1, use_ctr=1 in ctr_layers, ssm_args=ssm_args_for(1))
+        self.l1 = TCN_ViT_unit(3, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=1)
         # * num_heads, effect of concatenation following the official implementation
-        self.l2 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=2, use_ctr=2 in ctr_layers, ssm_args=ssm_args_for(2))
-        self.l3 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=3, use_ctr=3 in ctr_layers, ssm_args=ssm_args_for(3))
-        self.l4 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=4, use_ctr=4 in ctr_layers, ssm_args=ssm_args_for(4))
-        self.l5 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=5, use_ctr=5 in ctr_layers, ssm_args=ssm_args_for(5))
-        self.l6 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=6, use_ctr=6 in ctr_layers, ssm_args=ssm_args_for(6))
-        self.l7 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=7, use_ctr=7 in ctr_layers, ssm_args=ssm_args_for(7))
+        self.l2 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=2)
+        self.l3 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=3)
+        self.l4 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=4)
+        self.l5 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=5)
+        self.l6 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=6)
+        self.l7 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=7)
         # self.l8 = TCN_ViT_unit(24 * num_of_heads, 24 * num_of_heads, A, num_of_heads=num_of_heads)
-        self.l8 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=8, use_ctr=8 in ctr_layers, ssm_args=ssm_args_for(8))
-        self.l9 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9, use_ctr=9 in ctr_layers, ssm_args=ssm_args_for(9))
-        self.l10 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=10, use_ctr=10 in ctr_layers, ssm_args=ssm_args_for(10))
+        self.l8 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=8)
+        self.l9 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9)
+        self.l10 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=10)
         # self.l11 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9)
         # self.l12 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9)
 
@@ -778,21 +707,6 @@ class Model(nn.Module):
             self.drop_out = nn.Dropout(drop_out)
         else:
             self.drop_out = lambda x: x
-
-        self.fr_layers = tuple(fr_layers or ())
-        self.fr_loss_weight = float(fr_loss_weight)
-        if self.fr_loss_weight < 0:
-            raise ValueError('fr_loss_weight must be non-negative')
-        if self.fr_layers:
-            if fr_layer_weights is None:
-                raise ValueError('fr_layer_weights must be supplied with fr_layers')
-            self.fr_head = MultiLevelFRHead(
-                in_channels=24 * num_of_heads, num_classes=num_class,
-                num_person=num_person, levels=self.fr_layers,
-                level_weights=fr_layer_weights, hidden_channels=fr_hidden_channels,
-                num_frames=fr_input_frames, num_joints=num_point)
-        else:
-            self.fr_head = None
 
         # self.transformer = Transformer(
         #     width=transformer_width,
@@ -846,13 +760,16 @@ class Model(nn.Module):
         ## n, c, t, v
         x = x.view(N, M, V, C, T).contiguous().view(N * M, V, C, T).permute(0, 2, 3, 1)
 
-        features = {}
-        for layer in range(1, 11):
-            x = getattr(self, 'l{}'.format(layer))(x, self.joint_label, groups)
-            if self.training and self.fr_head is not None and layer in self.fr_layers:
-                # Subsequent layers contain in-place activations; keep the
-                # original intermediate tensor for the auxiliary heads.
-                features[layer] = x.clone()
+        x = self.l1(x, self.joint_label, groups)
+        x = self.l2(x, self.joint_label, groups)
+        x = self.l3(x, self.joint_label, groups)
+        x = self.l4(x, self.joint_label, groups)
+        x = self.l5(x, self.joint_label, groups)
+        x = self.l6(x, self.joint_label, groups)
+        x = self.l7(x, self.joint_label, groups)
+        x = self.l8(x, self.joint_label, groups)
+        x = self.l9(x, self.joint_label, groups)
+        x = self.l10(x, self.joint_label, groups)
         # x = self.l11(x, self.joint_label, groups)
         # x = self.l12(x, self.joint_label, groups)
 
@@ -891,9 +808,4 @@ class Model(nn.Module):
         # t = t[torch.arange(t.shape[0]), texts.argmax(dim=-1)] @ self.text_projection   # 400 512  
 
 
-        if self.training and self.fr_head is not None:
-            labels = y.argmax(dim=1) if y.ndim == 2 else y.long()
-            auxiliary = self.fr_head([features[layer] for layer in self.fr_layers],
-                                     x, labels, num_person=M)
-            return x, self.fr_loss_weight * auxiliary
-        return x, y # Preserve the existing evaluation/baseline interface.
+        return x, y #z

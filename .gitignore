@@ -11,3 +11,8 @@ data/
 *.pth
 *.log
 *.egg-info/
+
+build/
+dist/
+*.so
+*.o
