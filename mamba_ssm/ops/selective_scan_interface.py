@@ -188,11 +188,26 @@ class MambaInnerFn(torch.autograd.Function):
     def forward(ctx, xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
                 out_proj_weight, out_proj_bias,
                 A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-                C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1, negative=False):
+                C_proj_bias=None, delta_softplus=True, negative=False, checkpoint_lvl=1):
         """
              xz: (batch, dim, seqlen)
+
+        Keep ``negative`` immediately after ``delta_softplus``: mamba_inner_fn passes both
+        positionally, and a mismatch here would silently be swallowed by the bounds check on
+        ``checkpoint_lvl`` (True == 1) instead of raising.
         """
         _require_negative_support(negative)
+        # torch.autograd.Function.apply only takes positional arguments, so a signature
+        # change that is not mirrored in mamba_inner_fn would land on the neighbouring
+        # parameter. bool is an int subclass, so True would silently satisfy the old
+        # `in [0, 1]` check; reject it explicitly.
+        if isinstance(checkpoint_lvl, bool) or not isinstance(checkpoint_lvl, int):
+            raise TypeError(
+                'checkpoint_lvl must be an int, got {!r}; mamba_inner_fn is probably passing '
+                'its arguments in the wrong order'.format(checkpoint_lvl))
+        if not isinstance(negative, bool):
+            raise TypeError('negative must be a bool, got {!r}; mamba_inner_fn is probably '
+                            'passing its arguments in the wrong order'.format(negative))
         assert checkpoint_lvl in [0, 1]
         L = xz.shape[-1]
         delta_rank = delta_proj_weight.shape[1]

@@ -145,26 +145,35 @@ def check_mamba_module(d_model, device, tolerance):
 
     outputs = {}
     for negative_mode in (False, True):
-        tol = tolerance
         native_out, native_grads = run(build(negative_mode), reference=False)
         ref_out, ref_grads = run(build(negative_mode), reference=True)
-        assert_close(f'{"negative" if negative_mode else "baseline"} mamba out',
-                     native_out, ref_out, *tol['output'])
+        label = 'negative' if negative_mode else 'baseline'
+        assert_close(f'{label} mamba out', native_out, ref_out, *tolerance['output'])
         for name in native_grads:
-            assert_close(f'{"negative" if negative_mode else "baseline"} grad {name}',
-                         native_grads[name], ref_grads[name], *tol['grad'])
+            assert_close(f'{label} grad {name}', native_grads[name], ref_grads[name],
+                         *tolerance['grad'])
         if not all(torch.isfinite(g).all() for g in native_grads.values()):
             raise AssertionError('non-finite parameter gradient')
         if float(native_grads['A_log'].abs().max()) == 0.0:
             raise AssertionError('A_log gradient is identically zero')
-        outputs[negative_mode] = native_out
+        outputs[negative_mode] = (native_out, ref_out)
 
-    difference = float((outputs[True] - outputs[False]).abs().max())
-    if difference < 1e-3:
-        raise AssertionError('negative mode produced the same output as baseline; '
-                             'the branch is not engaged')
-    print(f'    negative vs baseline output difference: {difference:.3e} (mechanism engaged)',
-          flush=True)
+    # The decisive test for plumbing, not for arithmetic: flipping the flag must move the
+    # fused path by the same amount as the reference. A flag that is silently dropped (for
+    # example by a positional-argument mismatch inside the autograd Function) leaves the
+    # native gap at exactly zero while the reference gap stays finite, and no per-mode
+    # tolerance can see that.
+    native_gap = float((outputs[True][0] - outputs[False][0]).abs().max())
+    reference_gap = float((outputs[True][1] - outputs[False][1]).abs().max())
+    scale = float(outputs[False][0].abs().max())
+    print(f'    mode gap: native={native_gap:.3e} reference={reference_gap:.3e} '
+          f'(output scale {scale:.3e})', flush=True)
+    if reference_gap <= 1e-6:
+        raise AssertionError('the reference does not distinguish the two modes at these weights')
+    if not 0.5 * reference_gap <= native_gap <= 2.0 * reference_gap:
+        raise AssertionError(
+            'the fused path does not follow the negative flag: native gap '
+            f'{native_gap:.3e} vs reference gap {reference_gap:.3e}')
 
 
 def _reference_inner(xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
