@@ -32,6 +32,43 @@ bash test.sh /path/to/checkpoint.pt
 
 The configuration uses seed 4321, 64 frames, batch size 16, 50 epochs and GPU 0. Adjust the config for your hardware. Training outputs are written to `work_dir/ntu60/xsub/simba_joint/`. Additional arguments passed to `train.sh` are forwarded to `main.py`. For a quick check, run `bash train.sh --num-epoch 1` before starting the full experiment.
 
+`bash test.sh <checkpoint> [config]` takes an optional config because the config selects the SSM
+operator; `main.py` refuses a checkpoint whose recorded `scan_mode` does not match the config.
+
+## Negative-eigenvalue scan (experimental)
+
+`model_args.scan_mode` selects the Mamba state-retention term:
+
+| `scan_mode` | transition `a[t]` | range |
+| --- | --- | --- |
+| `baseline` (default) | `exp(delta[t] * A)` | (0, 1) |
+| `negative` | `2 * exp(delta[t] * A) - 1` | (-1, 1) |
+
+This follows Grazzi et al., *Unlocking State-Tracking in Linear RNNs Through Negative Eigenvalues*
+(ICLR 2025). It adds no parameters and changes no tensor shape; only the transition inside the
+selective scan differs.
+
+The compiled extension must be rebuilt after pulling, because the negative branch lives in
+`csrc/selective_scan`:
+
+```bash
+rm -rf build && python setup.py build_ext --inplace
+python -m unittest tests.test_negative_scan -v
+python tools/check_negative_scan_cuda.py     # operator vs reference, forward and all gradients
+```
+
+Then, per group:
+
+```bash
+bash run_negative.sh negative --num-epoch 10
+bash run_negative.sh baseline --num-epoch 10
+python tools/scan_statistics.py --config config/nturgbd-cross-subject/joint_autodl_negative.yaml
+```
+
+See [docs/negative_eigenvalues_10ep.md](docs/negative_eigenvalues_10ep.md) for the design, the
+self-check gate and the pre-registered decision rule.
+
+
 ## Acknowledgements and citation
 
 Simba builds on [Hyperformer](https://github.com/ZhouYuxuanYX/Hyperformer), [Mamba](https://github.com/state-spaces/mamba) and [Shift-GCN](https://github.com/kchengiva/Shift-GCN).

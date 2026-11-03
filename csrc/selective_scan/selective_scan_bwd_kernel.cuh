@@ -107,6 +107,9 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
     scan_t *smem_running_postfix = reinterpret_cast<scan_t *>(smem_delta_a + 2 * MAX_DSTATE + kNThreads);
     weight_t *smem_da = reinterpret_cast<weight_t *>(smem_running_postfix + MAX_DSTATE);
     weight_t *smem_dbc = reinterpret_cast<weight_t *>(smem_da + MAX_DSTATE);
+    // Negative-eigenvalue mode only: prefix state at the end of each thread's segment, so that
+    // item 0 of a thread can recover h[t - 1] across the block-scan boundary.
+    float *smem_h_prev = reinterpret_cast<float *>(smem_dbc + MAX_DSTATE);
 
     const int batch_id = blockIdx.x;
     const int dim_id = blockIdx.y;
@@ -245,11 +248,13 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
                     const float delta_a_exp = exp2f(delta_vals[i] * A_scaled);
-                    thread_data[i] = make_float2(delta_a_exp, !kIsVariableB ? delta_vals[i] * float(u_vals[i]) : delta_vals[i] * float(u_vals[i]) * B_vals[i]);
+                    // Negative-eigenvalue expansion, identical to the forward pass.
+                    const float delta_a = params.negative ? 2.f * delta_a_exp - 1.f : delta_a_exp;
+                    thread_data[i] = make_float2(delta_a, !kIsVariableB ? delta_vals[i] * float(u_vals[i]) : delta_vals[i] * float(u_vals[i]) * B_vals[i]);
                     if (i == 0) {
-                        smem_delta_a[threadIdx.x == 0 ? state_idx + (chunk % 2) * MAX_DSTATE : threadIdx.x + 2 * MAX_DSTATE] = delta_a_exp;
+                        smem_delta_a[threadIdx.x == 0 ? state_idx + (chunk % 2) * MAX_DSTATE : threadIdx.x + 2 * MAX_DSTATE] = delta_a;
                     } else {
-                        thread_reverse_data[i - 1].x = delta_a_exp;
+                        thread_reverse_data[i - 1].x = delta_a;
                     }
                     thread_reverse_data[i].y = dout_vals[i] *
                         (!kIsVariableC
@@ -266,6 +271,14 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                 Ktraits::BlockScanT(smem_scan).InclusiveScan(
                     thread_data, thread_data, SSMScanOp<weight_t>(), prefix_op
                 );
+                if (params.negative) {
+                    // Publish the prefix state at the end of each thread's segment. Item 0 of a
+                    // thread needs h[t - 1] to rebuild 2 * exp(delta * A) * h[t - 1]; dividing by
+                    // the transition is not an option because it can be arbitrarily close to zero.
+                    if (threadIdx.x == 0) { smem_h_prev[0] = running_prefix.y; }
+                    smem_h_prev[threadIdx.x + 1] = thread_data[kNItems - 1].y;
+                    __syncthreads();
+                }
                 scan_t running_postfix = chunk < params.n_chunks - 1 && threadIdx.x % 32 == 0 ? smem_running_postfix[state_idx] : make_float2(1.f, 0.f);
                 SSMScanPrefixCallbackOp<weight_t> postfix_op(running_postfix);
                 Ktraits::BlockReverseScanT(smem_reverse_scan).InclusiveReverseScan(
@@ -280,8 +293,17 @@ void selective_scan_bwd_kernel(SSMParamsBwd params) {
                     const float ddelta_u = !kIsVariableB ? dx : dx * B_vals[i];
                     du_vals[i] += ddelta_u * delta_vals[i];
                     const float a = thread_data[i].y - (!kIsVariableB ? delta_vals[i] * float(u_vals[i]) : delta_vals[i] * float(u_vals[i]) * B_vals[i]);
-                    ddelta_vals[i] += ddelta_u * float(u_vals[i]) + dx * A_val * a;
-                    dA_val += dx * delta_vals[i] * a;
+                    // a == transition * h[t-1] and d(transition)/d(delta) = transition * A.
+                    // Under the negative-eigenvalue map the transition derivative is
+                    // 2 * exp(delta * A) * A, and (2q - 1) * h[t-1] + h[t-1] == 2q * h[t-1].
+                    float a_coef = a;
+                    if (params.negative) {
+                        float h_prev = smem_h_prev[threadIdx.x];
+                        if (i > 0) { h_prev = thread_data[i - 1].y; }
+                        a_coef += h_prev;
+                    }
+                    ddelta_vals[i] += ddelta_u * float(u_vals[i]) + dx * A_val * a_coef;
+                    dA_val += dx * delta_vals[i] * a_coef;
                     if constexpr (!kIsVariableB || !kIsVariableC) {
                         if constexpr (!kIsVariableB) {  // dBC_val is dB_val
                             dBC_val += dout_vals[i] * (!kIsVariableC ? thread_data[i].y : thread_data[i].y * C_vals[i]);
@@ -498,7 +520,9 @@ void selective_scan_bwd_launch(SSMParamsBwd &params, cudaStream_t stream) {
                         using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, kIsEvenLen, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, input_t, weight_t>;
                         // using Ktraits = Selective_Scan_bwd_kernel_traits<kNThreads, kNItems, true, kIsVariableB, kIsVariableC, kDeltaSoftplus, kHasZ, input_t, weight_t>;
                         // TODO: check this
-                        constexpr int kSmemSize = Ktraits::kSmemSize + MAX_DSTATE * sizeof(typename Ktraits::scan_t) + (kNThreads + 4 * MAX_DSTATE) * sizeof(typename Ktraits::weight_t);
+                        // + (kNThreads + 1) floats for the per-thread prefix states used by the
+                        // negative-eigenvalue gradient.
+                        constexpr int kSmemSize = Ktraits::kSmemSize + MAX_DSTATE * sizeof(typename Ktraits::scan_t) + (kNThreads + 4 * MAX_DSTATE) * sizeof(typename Ktraits::weight_t) + (kNThreads + 1) * sizeof(float);
                         // printf("smem_size = %d\n", kSmemSize);
                         dim3 grid(params.batch, params.dim);
                         auto kernel = &selective_scan_bwd_kernel<Ktraits>;

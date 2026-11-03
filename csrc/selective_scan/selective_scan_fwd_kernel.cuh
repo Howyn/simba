@@ -213,7 +213,14 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
                     if constexpr (!kIsComplex) {
-                        thread_data[i] = make_float2(exp2f(delta_vals[r][i] * A_val[r]),
+                        // Negative-eigenvalue expansion: instead of a single exponential decay
+                        // exp(delta * A) in (0, 1), use 2 * exp(delta * A) - 1 in (-1, 1).
+                        // The scan below is a general first-order linear recurrence, so only the
+                        // per-step transition changes; the identity element (1, 0) for padded
+                        // positions is still correct.
+                        const float delta_a_exp = exp2f(delta_vals[r][i] * A_val[r]);
+                        const float delta_a = params.negative ? 2.f * delta_a_exp - 1.f : delta_a_exp;
+                        thread_data[i] = make_float2(delta_a,
                                                      !kIsVariableB ? delta_u_vals[r][i] : B_vals[i] * delta_u_vals[r][i]);
                         if constexpr (!Ktraits::kIsEvenLen) {  // So that the last state is correct
                             if (threadIdx.x * kNItems + i >= params.seqlen - chunk * kChunkSize) {

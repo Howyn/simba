@@ -229,7 +229,8 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
                   const c10::optional<at::Tensor> &D_,
                   const c10::optional<at::Tensor> &z_,
                   const c10::optional<at::Tensor> &delta_bias_,
-                  bool delta_softplus) {
+                  bool delta_softplus,
+                  bool negative) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -320,6 +321,9 @@ selective_scan_fwd(const at::Tensor &u, const at::Tensor &delta,
                        x.data_ptr(),
                        has_z,
                        delta_softplus);
+    TORCH_CHECK(!(negative && is_complex),
+                "the negative-eigenvalue scan is only implemented for a real A");
+    params.negative = negative;
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
@@ -346,7 +350,8 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
                   const c10::optional<at::Tensor> &out_,
                   c10::optional<at::Tensor> &dz_,
                   bool delta_softplus,
-                  bool recompute_out_z) {
+                  bool recompute_out_z,
+                  bool negative) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -475,6 +480,9 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
                        D_.has_value() ? dD.data_ptr() : nullptr,
                        delta_bias_.has_value() ? ddelta_bias.data_ptr() : nullptr,
                        has_z, delta_softplus, recompute_out_z);
+    TORCH_CHECK(!(negative && is_complex),
+                "the negative-eigenvalue scan is only implemented for a real A");
+    params.negative = negative;
 
     // Otherwise the kernel will be launched from cuda:0 device
     // Cast to char to avoid compiler warning about narrowing
@@ -494,4 +502,7 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("fwd", &selective_scan_fwd, "Selective scan forward");
     m.def("bwd", &selective_scan_bwd, "Selective scan backward");
+    // Probed by the Python wrapper so a stale build fails with a clear message instead of
+    // silently falling back to the baseline transition.
+    m.attr("negative_scan_supported") = true;
 }

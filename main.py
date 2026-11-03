@@ -111,6 +111,9 @@ def epoch_saving(epoch, model, optimizer, filename, *, global_step=None,
                     'global_step': None if global_step is None else int(global_step),
                     'best_accuracy': None if best_accuracy is None else float(best_accuracy),
                     'best_epoch': None if best_epoch is None else int(best_epoch),
+                    # Which SSM transition this run used, so evaluation cannot silently
+                    # score a negative-eigenvalue checkpoint with the baseline operator.
+                    'scan_mode': getattr(getattr(model, 'module', model), 'scan_mode', None),
                     }
     from tools.training_rng import capture_rng_state
     checkpoint['rng_state'] = capture_rng_state()
@@ -440,6 +443,16 @@ class Processor():
             worker_init_fn=init_seed,
             **worker_options)
 
+    def _verify_scan_mode(self, checkpoint, source):
+        """Refuse to evaluate a checkpoint with a different SSM transition than it was trained with."""
+        saved = checkpoint.get('scan_mode') if isinstance(checkpoint, dict) else None
+        selected = getattr(self.model, 'scan_mode', None)
+        if saved is not None and selected is not None and saved != selected:
+            raise ValueError(
+                '{} was trained with scan_mode={!r} but the current config selects {!r}. '
+                'Pass the matching --config (joint_autodl.yaml for baseline, '
+                'joint_autodl_negative.yaml for negative).'.format(source, saved, selected))
+
     def load_model(self):
         output_device = self.arg.device[0] if type(self.arg.device) is list else self.arg.device
         self.output_device = output_device
@@ -464,6 +477,7 @@ class Processor():
             # Training checkpoints include optimizer and epoch metadata; older
             # standalone weight files are still accepted.
             if isinstance(weights, dict) and 'model_state_dict' in weights:
+                self._verify_scan_mode(weights, self.arg.weights)
                 weights = weights['model_state_dict']
 
             # weights = OrderedDict([[k.split('module.')[-1], v.cuda(output_device)] for k, v in weights.items()])
@@ -499,6 +513,7 @@ class Processor():
                 checkpoint = torch.load(self.arg.resume, map_location=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"))
             
             weights=checkpoint['model_state_dict']
+            self._verify_scan_mode(checkpoint, self.arg.resume)
             weights = OrderedDict([[k.split('module.')[-1], v.cuda(output_device)] for k, v in weights.items()])
 
             keys = list(weights.keys())

@@ -10,12 +10,29 @@ from causal_conv1d import causal_conv1d_fn
 from causal_conv1d.cpp_functions import causal_conv1d_bwd_function
 import selective_scan_cuda
 
+from mamba_ssm.ops.scan_reference import selective_scan_reference
+
+# The compiled kernel advertises whether it carries the negative-eigenvalue branch.
+NEGATIVE_SCAN_AVAILABLE = bool(getattr(selective_scan_cuda, "negative_scan_supported", False))
+
+
+def _require_negative_support(negative):
+    """Fail loudly on a stale build instead of silently running the baseline transition."""
+    if negative and not NEGATIVE_SCAN_AVAILABLE:
+        raise RuntimeError(
+            "scan_mode='negative' requires a rebuilt selective_scan_cuda extension, but the "
+            "loaded module has no negative-eigenvalue branch. Rebuild it in place with: "
+            "python setup.py build_ext --inplace   (or: pip install -e . --no-build-isolation "
+            "--force-reinstall) and rerun."
+        )
+
 
 class SelectiveScanFn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                return_last_state=False):
+                return_last_state=False, negative=False):
+        _require_negative_support(negative)
         if u.stride(-1) != 1:
             u = u.contiguous()
         if delta.stride(-1) != 1:
@@ -34,9 +51,11 @@ class SelectiveScanFn(torch.autograd.Function):
         if C.dim() == 3:
             C = rearrange(C, "b dstate l -> b 1 dstate l")
             ctx.squeeze_C = True
-        out, x, *rest = selective_scan_cuda.fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus)
+        out, x, *rest = selective_scan_cuda.fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
+                                                negative)
         ctx.delta_softplus = delta_softplus
         ctx.has_z = z is not None
+        ctx.negative = negative
         last_state = x[:, :, -1, 1::2]  # (batch, dim, dstate)
         if not ctx.has_z:
             ctx.save_for_backward(u, delta, A, B, C, D, delta_bias, x)
@@ -61,7 +80,8 @@ class SelectiveScanFn(torch.autograd.Function):
         # Here we just pass in None and dz will be allocated in the C++ code.
         du, ddelta, dA, dB, dC, dD, ddelta_bias, *rest = selective_scan_cuda.bwd(
             u, delta, A, B, C, D, z, delta_bias, dout, x, out, None, ctx.delta_softplus,
-            False  # option to recompute out_z, not used here
+            False,  # option to recompute out_z, not used here
+            ctx.negative,
         )
         dz = rest[0] if ctx.has_z else None
         dB = dB.squeeze(1) if getattr(ctx, "squeeze_B", False) else dB
@@ -71,20 +91,24 @@ class SelectiveScanFn(torch.autograd.Function):
                 dz,
                 ddelta_bias if delta_bias is not None else None,
                 None,
+                None,
                 None)
 
 
 def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                     return_last_state=False):
+                     return_last_state=False, negative=False):
     """if return_last_state is True, returns (out, last_state)
     last_state has shape (batch, dim, dstate). Note that the gradient of the last state is
     not considered in the backward pass.
+
+    ``negative`` switches the discrete transition from exp(delta * A) to 2 * exp(delta * A) - 1.
     """
-    return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state)
+    return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
+                                 return_last_state, negative)
 
 
 def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                      return_last_state=False):
+                      return_last_state=False, negative=False):
     """
     u: r(B D L)
     delta: r(B D L)
@@ -119,6 +143,11 @@ def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta
     x = A.new_zeros((batch, dim, dstate))
     ys = []
     deltaA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
+    if negative:
+        if A.is_complex():
+            raise NotImplementedError('the negative-eigenvalue scan only supports a real A')
+        # Negative-eigenvalue expansion: transition in (-1, 1) instead of (0, 1).
+        deltaA = 2 * deltaA - 1
     if not is_variable_B:
         deltaB_u = torch.einsum('bdl,dn,bdl->bdln', delta, B, u)
     else:
@@ -159,10 +188,11 @@ class MambaInnerFn(torch.autograd.Function):
     def forward(ctx, xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
                 out_proj_weight, out_proj_bias,
                 A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-                C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1):
+                C_proj_bias=None, delta_softplus=True, checkpoint_lvl=1, negative=False):
         """
              xz: (batch, dim, seqlen)
         """
+        _require_negative_support(negative)
         assert checkpoint_lvl in [0, 1]
         L = xz.shape[-1]
         delta_rank = delta_proj_weight.shape[1]
@@ -217,9 +247,10 @@ class MambaInnerFn(torch.autograd.Function):
         if D is not None:
             D = D.contiguous()
         out, scan_intermediates, out_z = selective_scan_cuda.fwd(
-            conv1d_out, delta, A, B, C, D, z, delta_bias, delta_softplus
+            conv1d_out, delta, A, B, C, D, z, delta_bias, delta_softplus, negative
         )
         ctx.delta_softplus = delta_softplus
+        ctx.negative = negative
         ctx.out_proj_bias_is_None = out_proj_bias is None
         ctx.checkpoint_lvl = checkpoint_lvl
         if checkpoint_lvl >= 1:  # Will recompute conv1d_out and delta in the backward pass
@@ -256,7 +287,8 @@ class MambaInnerFn(torch.autograd.Function):
         dconv1d_out, ddelta, dA, dB, dC, dD, ddelta_bias, dz, out_z = selective_scan_cuda.bwd(
             conv1d_out, delta, A, B, C, D, z, delta_bias, dout_y, scan_intermediates, out, dz,
             ctx.delta_softplus,
-            True  # option to recompute out_z
+            True,  # option to recompute out_z
+            ctx.negative,
         )
         dout_proj_weight = torch.einsum("eB,dB->ed", dout, rearrange(out_z, "b d l -> d (b l)"))
         dout_proj_bias = dout.sum(dim=(0, 1)) if not ctx.out_proj_bias_is_None else None
@@ -299,25 +331,26 @@ class MambaInnerFn(torch.autograd.Function):
                 dout_proj_weight, dout_proj_bias,
                 dA, dB, dC, dD,
                 ddelta_bias if delta_bias is not None else None,
-                dB_proj_bias, dC_proj_bias, None)
+                dB_proj_bias, dC_proj_bias, None, None)
 
 
 def mamba_inner_fn(
     xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
     out_proj_weight, out_proj_bias,
     A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-    C_proj_bias=None, delta_softplus=True
+    C_proj_bias=None, delta_softplus=True, negative=False
 ):
     return MambaInnerFn.apply(xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
                               out_proj_weight, out_proj_bias,
-                              A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, delta_softplus)
+                              A, B, C, D, delta_bias, B_proj_bias, C_proj_bias, delta_softplus,
+                              negative)
 
 
 def mamba_inner_ref(
     xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
     out_proj_weight, out_proj_bias,
     A, B=None, C=None, D=None, delta_bias=None, B_proj_bias=None,
-    C_proj_bias=None, delta_softplus=True
+    C_proj_bias=None, delta_softplus=True, negative=False
 ):
     L = xz.shape[-1]
     delta_rank = delta_proj_weight.shape[1]
@@ -347,5 +380,6 @@ def mamba_inner_ref(
         else:
             C = rearrange(C, "(b l) (dstate two) -> b dstate (l two)", l=L, two=2).contiguous()
     # y = selective_scan_fn(x, delta, A, B, C, D, z=z, delta_bias=delta_bias, delta_softplus=True)
-    y = selective_scan_ref(x, delta, A, B, C, D, z=z, delta_bias=delta_bias, delta_softplus=True)
+    y = selective_scan_ref(x, delta, A, B, C, D, z=z, delta_bias=delta_bias, delta_softplus=True,
+                           negative=negative)
     return F.linear(rearrange(y, "b d l -> b l d"), out_proj_weight, out_proj_bias)

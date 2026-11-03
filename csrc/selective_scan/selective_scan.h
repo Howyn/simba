@@ -32,6 +32,11 @@ struct SSMParamsBase {
     bool is_variable_C;
 
     bool delta_softplus;
+    // Negative-eigenvalue expansion: when true the discrete transition is
+    // 2 * exp(delta * A) - 1 instead of exp(delta * A). Everything else in the
+    // kernel is unchanged, because the scan is a general first-order linear
+    // recurrence and never assumes the transition is a single exponential.
+    bool negative;
 
     index_t A_d_stride;
     index_t A_dstate_stride;

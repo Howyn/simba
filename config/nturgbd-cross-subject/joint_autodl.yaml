@@ -31,6 +31,8 @@ model_args:
   graph_args:
     labeling_mode: spatial
   joint_label: [0, 4, 2, 2, 2, 2, 1, 1, 2, 2, 1, 1, 2, 3, 3, 3, 2, 3, 3, 3, 1, 0, 1, 0, 1]
+  # Explicit default; the negative-eigenvalue group sets this to "negative".
+  scan_mode: baseline
 weight_decay: 0.0004
 base_lr: 0.025
 lr_decay_rate: 0.1

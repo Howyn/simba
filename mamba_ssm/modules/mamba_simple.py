@@ -48,9 +48,18 @@ class Mamba(nn.Module):
         layer_idx=None,
         device=None,
         dtype=None,
+        scan_mode="baseline",
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
+        if scan_mode not in ("baseline", "negative"):
+            raise ValueError(
+                f"scan_mode must be 'baseline' or 'negative', got {scan_mode!r}")
+        # 'negative' selects the transition 2 * exp(delta * A) - 1, which can lie in (-1, 0);
+        # see Grazzi et al., "Unlocking State-Tracking in Linear RNNs Through Negative
+        # Eigenvalues", ICLR 2025. Only the state-retention term changes.
+        self.scan_mode = scan_mode
+        self.negative = scan_mode == "negative"
         self.d_model = d_model
         self.d_state = d_state
         self.d_conv = d_conv
@@ -158,6 +167,7 @@ class Mamba(nn.Module):
                 self.D.float(),
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
+                negative=self.negative,
             )
         else:
             x, z = xz.chunk(2, dim=1)
@@ -198,6 +208,7 @@ class Mamba(nn.Module):
                 delta_bias=self.dt_proj.bias.float(),
                 delta_softplus=True,
                 return_last_state=ssm_state is not None,
+                negative=self.negative,
             )
             if ssm_state is not None:
                 y, last_state = y
@@ -240,12 +251,18 @@ class Mamba(nn.Module):
             # Discretize A and B
             dt = F.softplus(dt + self.dt_proj.bias.to(dtype=dt.dtype))
             dA = torch.exp(torch.einsum("bd,dn->bdn", dt, A))
+            if self.negative:
+                dA = 2 * dA - 1
             dB = torch.einsum("bd,bn->bdn", dt, B)
             ssm_state.copy_(ssm_state * dA + rearrange(x, "b d -> b d 1") * dB)
             y = torch.einsum("bdn,bn->bd", ssm_state.to(dtype), C)
             y = y + self.D.to(dtype) * x
             y = y * self.act(z)  # (B D)
         else:
+            if self.negative:
+                raise NotImplementedError(
+                    "single-step decoding with scan_mode='negative' is not implemented; "
+                    "the Triton selective_state_update kernel assumes exp(delta * A)")
             y = selective_state_update(
                 ssm_state, x, dt, A, B, C, self.D, z=z, dt_bias=self.dt_proj.bias, dt_softplus=True
             )
