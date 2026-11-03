@@ -653,6 +653,7 @@ class Processor():
         print('Training epoch: {}'.format(epoch + 1))
         loader = self.data_loader['train']
         self.adjust_learning_rate(epoch)
+        self.print_log('Actual learning rate: {:.8g}'.format(self.optimizer.param_groups[0]['lr']))
 
         device = torch.device('cuda', self.output_device)
         metric_sum = torch.zeros(3, device=device, dtype=torch.float32)
