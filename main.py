@@ -333,6 +333,8 @@ def get_parser():
                         help='use base-lr from epoch 0 without warmup or decay')
     parser.add_argument('--screening', type=str2bool, default=False,
                         help='paired single-GPU fixed-LR AMP screening, at most 15 epochs')
+    parser.add_argument('--stop-after-epoch', type=int, default=None,
+                        help='pause screening after this epoch without changing the 15-epoch resume target')
     parser.add_argument('--save-latest', type=str2bool, default=False,
                         help='atomically save runs-latest.pt after each evaluated epoch for recovery')
     parser.add_argument('--strict-rng-resume', type=str2bool, default=False,
@@ -1035,6 +1037,14 @@ class Processor():
         self.print_log('Results: {}/results.json; checkpoints: runs-latest.pt / runs-best.pt / runs-final.pt'.format(
             self.arg.work_dir))
 
+    def pause_screening(self):
+        write_run_results(self.arg.work_dir, self.epoch_records, self.run_config,
+                          completed=False, best_accuracy=self.best_acc)
+        self.print_log('SCREENING PAUSED after epoch {}; target remains {}. '
+                       'Resume runs-latest.pt to continue; no stable-window conclusion yet.'.format(
+                           self.arg.start_epoch if not self.epoch_records else self.epoch_records[-1]['epoch'],
+                           self.arg.num_epoch))
+
     def start(self):
         if self.arg.phase == 'train':
             self.print_log('Parameters:\n{}\n'.format(str(vars(self.arg))))
@@ -1062,7 +1072,11 @@ class Processor():
                     self.finish_screening()
                     return
                 raise ValueError('start_epoch must be below num_epoch')
-            for epoch in range(self.arg.start_epoch, self.arg.num_epoch):
+            run_until = self.arg.stop_after_epoch or self.arg.num_epoch
+            if self.arg.screening and self.arg.start_epoch >= run_until:
+                self.pause_screening()
+                return
+            for epoch in range(self.arg.start_epoch, run_until):
                 epoch_started = time.perf_counter()
                 # Always save the final epoch so short smoke runs (for example,
                 # num_epoch=1 with the default save_epoch=10) still produce a
@@ -1089,11 +1103,11 @@ class Processor():
                     'epoch_seconds': float(time.perf_counter() - epoch_started),
                 }
                 self.epoch_records.append(record)
-                remaining = self.arg.num_epoch - epoch - 1
+                remaining = run_until - epoch - 1
                 eta = sum(row['epoch_seconds'] for row in self.epoch_records) / len(self.epoch_records) * remaining
                 self.print_log('EPOCH_RESULT epoch={}/{} top1={:.4f}% lr={:.8g} '
                                'seconds={:.1f} train_seconds={:.1f} eval_seconds={:.1f} ETA_minutes={:.1f}'.format(
-                                   epoch + 1, self.arg.num_epoch, record['top1_percent'], record['learning_rate'],
+                                   epoch + 1, run_until, record['top1_percent'], record['learning_rate'],
                                    record['epoch_seconds'], record['train_seconds'], eval_seconds, eta / 60))
                 if self.best_acc > previous_best:
                     # The best epoch need not coincide with a periodic save.
@@ -1106,7 +1120,10 @@ class Processor():
                                       best_accuracy=self.best_acc)
 
             if self.arg.screening:
-                self.finish_screening()
+                if run_until < self.arg.num_epoch:
+                    self.pause_screening()
+                else:
+                    self.finish_screening()
                 return
 
             # test the best model

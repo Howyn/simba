@@ -147,3 +147,32 @@ echo "launcher PID: $!"
 额外种子用 `--seed` 指定，两组必须同步补跑；初筛前不自动补种子。
 自定义数据位置可传 `--data-path /absolute/path/NTU60_CS.npz`，两组必须一致。
 启动器会拒绝覆盖已有实验目录；需要从头重跑时，用新的 `--output-root` 保存。
+
+## 追加：已运行基线改为两组各 9 轮初筛
+
+根据本次实验预算调整，先各跑 9 轮，不再据前三轮的增长趋势推断已经收敛。
+`--stop-after-epoch 9` 只是运行预算，不改变原有 15 轮目标、学习率或检查点签名；
+以后删除这个参数并使用 `--resume`，即可继续到 15 轮。
+
+已在后台运行的旧 Python 不会自动加载新代码。因此新增控制器会监视现有基线的
+原子结果文件，等第 9 轮 latest 检查点与评估结果写完后，核实 PID、脚本和配置路径，
+终止旧串行 shell 队列及其基线训练子进程，再开始带 9 轮预算的 MTI。
+可能看到旧基线刚打印第 10 轮开始，控制器会随即终止它；第 9 轮已保存。
+旧日志可能出现有意终止的退出码，原因另记在 `budget_stop.json` 中。
+不要手工停止当前训练，也不要同时运行两个控制器。
+
+拉取代码后，在当前实例执行一次：
+
+```bash
+mkdir -p logs
+nohup "$PWD/.venv/bin/python" -u tools/run_mti_comparison.py \
+  --output-root work_dir/ntu60/xsub/mti_bf16_v2 --stop-after-epoch 9 \
+  > logs/mti9_controller.log 2>&1 < /dev/null &
+echo "controller PID: $!"
+```
+
+基线进度仍在原 `logs/mti15_comparison_bf16_v2.log`；
+控制器状态与后续 MTI 的实时日志在 `logs/mti9_controller.log`。
+两组结果仍写入各自原目录，`completed=false`、稳定区间 `incomplete` 是预算暂停的
+预期状态，并非失败；阶段性权重是 `runs-latest.pt`，不标记为完整 15 轮最终权重。
+比较同一个 epoch 或同一段预先指定的曲线，不能用基线第 9 轮对 MTI 第 15 轮。

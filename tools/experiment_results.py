@@ -25,6 +25,9 @@ def training_signature(args):
 
 
 def validate_screening(args):
+    budget = getattr(args, 'stop_after_epoch', None)
+    if budget is not None and (not args.screening or not 1 <= budget <= args.num_epoch):
+        raise ValueError('stop_after_epoch requires screening and must be between 1 and num_epoch')
     if not args.screening:
         return
     if not args.fixed_lr or args.warm_up_epoch != 0 or args.step:

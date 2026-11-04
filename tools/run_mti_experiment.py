@@ -59,7 +59,11 @@ def main():
     parser.add_argument('--data-path', type=Path)
     parser.add_argument('--output-root', type=Path, default=ROOT / 'work_dir/ntu60/xsub/mti_fixed15')
     parser.add_argument('--resume', action='store_true', help='resume this variant/seed from runs-latest.pt')
+    parser.add_argument('--stop-after-epoch', type=int, default=None,
+                        help='pause at this epoch, preserving the original 15-epoch target')
     args = parser.parse_args()
+    if args.stop_after_epoch is not None and not 1 <= args.stop_after_epoch <= 15:
+        parser.error('--stop-after-epoch must be between 1 and 15')
     name = 'baseline' if args.variant == 'baseline' else 'enabled'
     config_path = ROOT / f'config/nturgbd-cross-subject/joint_mti_{name}15.yaml'
     config = yaml.safe_load(config_path.read_text(encoding='utf-8'))
@@ -95,13 +99,17 @@ def main():
         command = [sys.executable, '-u', str(ROOT / 'main.py'), '--config', str(launch_config)]
         if args.resume:
             command.extend(['--resume', str(checkpoint)])
+        if args.stop_after_epoch is not None:
+            command.extend(['--stop-after-epoch', str(args.stop_after_epoch)])
         status = {
             'variant': args.variant, 'seed': args.seed, 'revision': revision,
             'python': sys.executable, 'work_dir': str(work_dir),
             'started_unix': time.time(), 'status': 'running', 'launcher_pid': os.getpid(),
+            'budget_epoch': args.stop_after_epoch or 15,
         }
         atomic_text(work_dir / 'launcher_status.json', json.dumps(status, indent=2) + '\n')
-        print(f"Launching ONLY {args.variant}, seed={args.seed}; fixed LR=0.005; {config['precision']} AMP; 15 epochs.", flush=True)
+        print(f"Launching ONLY {args.variant}, seed={args.seed}; fixed LR=0.005; {config['precision']} AMP; "
+              f"budget={args.stop_after_epoch or 15}, target=15 epochs.", flush=True)
         print(f'Python: {sys.executable}\nWork directory: {work_dir}', flush=True)
         environment = os.environ.copy()
         environment['PYTHONUNBUFFERED'] = '1'
