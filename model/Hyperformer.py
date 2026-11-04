@@ -448,11 +448,11 @@ class unit_vit(nn.Module):
         return x
 
 class TCN_ViT_unit(nn.Module):
-    def __init__(self, in_channels, out_channels, A, stride=1, num_of_heads=6, residual=True, kernel_size=5, dilations=[1,2], pe=False, num_point=25, layer=0, scan_mode="baseline"):
+    def __init__(self, in_channels, out_channels, A, stride=1, num_of_heads=6, residual=True, kernel_size=5, dilations=[1,2], pe=False, num_point=25, layer=0):
         super(TCN_ViT_unit, self).__init__()
         # Flattened joint/channel features are fed to Mamba.  500 only
         # matches UCLA's 20 joints x 25 channels; NTU uses 25 joints.
-        self.mamba = MambaBlock(embed_dim=num_point * 25, scan_mode=scan_mode)
+        self.mamba = MambaBlock(embed_dim=num_point * 25)
         # self.mamba_2 = MambaBlock(embed_dim=512)
         self.shift_gcn = Shift_gcn(in_channels,out_channels,A)
         self.shift_gcn_2 = Shift_gcn(out_channels,108,A).to('cuda')
@@ -634,7 +634,7 @@ class TCN_ViT_unit(nn.Module):
 
 class Model(nn.Module):
     def __init__(self, num_class=400, num_point=18, num_person=2, graph=None, graph_args=dict(), in_channels=3,
-                 drop_out=0, num_of_heads=9, joint_label=[], scan_mode="baseline", **kwargs):
+                 drop_out=0, num_of_heads=9, joint_label=[], **kwargs):
         super(Model, self).__init__()
 
         if graph is None:
@@ -653,18 +653,18 @@ class Model(nn.Module):
         self.joint_label = joint_label
 
 
-        self.l1 = TCN_ViT_unit(3, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=1, scan_mode=scan_mode)
+        self.l1 = TCN_ViT_unit(3, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=1)
         # * num_heads, effect of concatenation following the official implementation
-        self.l2 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=2, scan_mode=scan_mode)
-        self.l3 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=3, scan_mode=scan_mode)
-        self.l4 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=4, scan_mode=scan_mode)
-        self.l5 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=5, scan_mode=scan_mode)
-        self.l6 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=6, scan_mode=scan_mode)
-        self.l7 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=7, scan_mode=scan_mode)
+        self.l2 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=2)
+        self.l3 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=3)
+        self.l4 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=4)
+        self.l5 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=5)
+        self.l6 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=6)
+        self.l7 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=7)
         # self.l8 = TCN_ViT_unit(24 * num_of_heads, 24 * num_of_heads, A, num_of_heads=num_of_heads)
-        self.l8 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=8, scan_mode=scan_mode)
-        self.l9 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9, scan_mode=scan_mode)
-        self.l10 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=10, scan_mode=scan_mode)
+        self.l8 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=8)
+        self.l9 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9)
+        self.l10 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=10)
         # self.l11 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9)
         # self.l12 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9)
 

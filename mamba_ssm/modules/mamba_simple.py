@@ -48,13 +48,9 @@ class Mamba(nn.Module):
         layer_idx=None,
         device=None,
         dtype=None,
-        scan_mode="baseline",
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
-        if scan_mode not in ("baseline", "negative"):
-            raise ValueError(f"Invalid scan mode: {scan_mode}")
-        self.scan_mode = scan_mode
         self.d_model = d_model
         self.d_state = d_state
         self.d_conv = d_conv
@@ -126,8 +122,6 @@ class Mamba(nn.Module):
         hidden_states: (B, L, D)
         Returns: same shape as hidden_states
         """
-        if self.scan_mode == "negative" and inference_params is not None:
-            raise NotImplementedError("Negative scan does not support inference cache")
         batch, seqlen, dim = hidden_states.shape
 
         conv_state, ssm_state = None, None
@@ -150,11 +144,7 @@ class Mamba(nn.Module):
         A = -torch.exp(self.A_log.float())  # (d_inner, d_state)
         # In the backward pass we write dx and dz next to each other to avoid torch.cat
         if self.use_fast_path and inference_params is None:  # Doesn't support outputting the states
-            if self.scan_mode == "negative":
-                from mamba_ssm.ops.negative_scan_interface import mamba_inner_fn as scan_inner
-            else:
-                scan_inner = mamba_inner_fn
-            out = scan_inner(
+            out = mamba_inner_fn(
                 xz,
                 self.conv1d.weight,
                 self.conv1d.bias,
@@ -197,11 +187,7 @@ class Mamba(nn.Module):
             B = rearrange(B, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             C = rearrange(C, "(b l) dstate -> b dstate l", l=seqlen).contiguous()
             assert self.activation in ["silu", "swish"]
-            if self.scan_mode == "negative":
-                from mamba_ssm.ops.negative_scan_interface import selective_scan_fn as scan_fn
-            else:
-                scan_fn = selective_scan_fn
-            y = scan_fn(
+            y = selective_scan_fn(
                 x,
                 dt,
                 A,
@@ -221,8 +207,6 @@ class Mamba(nn.Module):
         return out
 
     def step(self, hidden_states, conv_state, ssm_state):
-        if self.scan_mode == "negative":
-            raise NotImplementedError("Negative scan does not support step inference")
         dtype = hidden_states.dtype
         assert hidden_states.shape[1] == 1, "Only support decoding with 1 token at a time for now"
         xz = self.in_proj(hidden_states.squeeze(1))  # (B 2D)

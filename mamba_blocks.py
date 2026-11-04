@@ -4,9 +4,9 @@ import torch.nn as nn
 
 
 class MambaBlock(nn.Module):
-    def __init__(self, embed_dim, dropout_level=0, scan_mode="baseline"):
+    def __init__(self, embed_dim, dropout_level=0):
         super().__init__()
-        self.mamba = Mamba(d_model=embed_dim, d_state=16, d_conv=4, expand=2, scan_mode=scan_mode)
+        self.mamba = Mamba(d_model=embed_dim, d_state=16, d_conv=4, expand=2)
         self.norm = RMSNorm(embed_dim)
         self.dropout = nn.Dropout(dropout_level)
 
