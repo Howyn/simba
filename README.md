@@ -160,3 +160,10 @@ data file as previous baseline runs. `tools/prepare_ntu60_xsub.py` is retained
 for data preparation, and `tools/training_rng.py` for checkpoint recovery.
 Dataset files and training outputs are not included. No new experiment or
 training schedule is introduced in this restoration.
+
+## MTI screening experiment
+
+The optional `model_args.use_mti` switch adds only the temporal MTI module from
+TSkel-Mamba. It defaults to false. See [MTI_EXPERIMENT.md](MTI_EXPERIMENT.md)
+for the paper attribution, explicit adaptation conventions, paired fixed-LR
+15-epoch FP16 AMP protocol, AutoDL background commands and checkpoint recovery.

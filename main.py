@@ -33,6 +33,9 @@ from utils.NCELoss import NCELoss, LabelSmoothingCrossEntropy
 import resource
 import copy
 import tempfile
+from tools.experiment_results import (
+    check_resume_signature, training_signature, validate_screening, write_run_results,
+)
 from torch import linalg as LA
 # import torch.multiprocessing
 # torch.multiprocessing.set_sharing_strategy('file_system')
@@ -96,7 +99,8 @@ def get_mmd_loss(z, z_prior, y, num_cls):
     return mmd_loss, l2_z_mean, z_mean[y_valid]
 
 def epoch_saving(epoch, model, optimizer, filename, *, global_step=None,
-                 best_accuracy=None, best_epoch=None):
+                 best_accuracy=None, best_epoch=None, scaler=None,
+                 epoch_records=None, run_config=None):
     state_dict = model.state_dict()
     weights = OrderedDict([[k.split('module.')[-1], v.cpu()] for k, v in state_dict.items()])
     optimizer_state = optimizer.state_dict()
@@ -111,6 +115,9 @@ def epoch_saving(epoch, model, optimizer, filename, *, global_step=None,
                     'global_step': None if global_step is None else int(global_step),
                     'best_accuracy': None if best_accuracy is None else float(best_accuracy),
                     'best_epoch': None if best_epoch is None else int(best_epoch),
+                    'scaler_state_dict': None if scaler is None else scaler.state_dict(),
+                    'epoch_records': [] if epoch_records is None else epoch_records,
+                    'run_config': run_config,
                     }
     from tools.training_rng import capture_rng_state
     checkpoint['rng_state'] = capture_rng_state()
@@ -235,7 +242,7 @@ def get_parser():
         type=int,
         default=48,
         help='the number of worker for data loader')
-    parser.add_argument('--precision', choices=['fp32', 'bf16'], default='fp32',
+    parser.add_argument('--precision', choices=['fp32', 'fp16', 'bf16'], default='fp32',
                         help='training precision; evaluation remains FP32')
     parser.add_argument('--tf32', type=str2bool, default=None,
                         help='enable/disable TF32 for CUDA matmul and cuDNN; default leaves PyTorch settings unchanged')
@@ -322,6 +329,10 @@ def get_parser():
         default=0.1,
         help='decay rate for learning rate')
     parser.add_argument('--warm_up_epoch', type=int, default=0)
+    parser.add_argument('--fixed-lr', type=str2bool, default=False,
+                        help='use base-lr from epoch 0 without warmup or decay')
+    parser.add_argument('--screening', type=str2bool, default=False,
+                        help='paired single-GPU fixed-LR AMP screening, at most 15 epochs')
     parser.add_argument('--save-latest', type=str2bool, default=False,
                         help='atomically save runs-latest.pt after each evaluated epoch for recovery')
     parser.add_argument('--strict-rng-resume', type=str2bool, default=False,
@@ -337,6 +348,9 @@ class Processor():
 
     def __init__(self, arg):
         self.arg = arg
+        validate_screening(arg)
+        self.run_config = training_signature(arg)
+        self.epoch_records = []
         if arg.log_interval < 1:
             raise ValueError('log-interval must be at least 1')
         if arg.num_worker < 0 or arg.prefetch_factor < 1:
@@ -377,7 +391,19 @@ class Processor():
         else:
             self.load_optimizer()
             # self.load_lr_scheduler()
+            self.scaler = torch.amp.GradScaler('cuda', enabled=arg.precision == 'fp16')
+            if arg.resume:
+                scaler_state = self._resume_checkpoint.get('scaler_state_dict')
+                if arg.screening and not scaler_state:
+                    raise ValueError('AMP screening resume requires GradScaler state')
+                if scaler_state:
+                    self.scaler.load_state_dict(scaler_state)
+                self.epoch_records = self._resume_checkpoint.get('epoch_records', [])
+                if arg.screening and [row['epoch'] for row in self.epoch_records] != list(range(1, arg.start_epoch + 1)):
+                    raise ValueError('checkpoint epoch records are incomplete; resume runs-latest.pt')
             self.load_data()
+            if arg.resume:
+                del self._resume_checkpoint
             
         self.lr = self.arg.base_lr
         self.best_acc = -1
@@ -496,7 +522,11 @@ class Processor():
                 with open(self.arg.resume, 'r') as f:
                     checkpoint = pickle.load(f)
             else:
-                checkpoint = torch.load(self.arg.resume, map_location=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"))
+                checkpoint = torch.load(self.arg.resume, map_location='cpu')
+
+            self._resume_checkpoint = checkpoint
+            if self.arg.screening:
+                check_resume_signature(checkpoint.get('run_config'), self.run_config)
             
             weights=checkpoint['model_state_dict']
             weights = OrderedDict([[k.split('module.')[-1], v.cuda(output_device)] for k, v in weights.items()])
@@ -521,6 +551,8 @@ class Processor():
             try:
                 self.model.load_state_dict(weights)
             except:
+                if self.arg.screening:
+                    raise
                 state = self.model.state_dict()
                 diff = list(set(state.keys()).difference(set(weights.keys())))
                 print('Can not find these weights:')
@@ -567,7 +599,7 @@ class Processor():
             raise ValueError()
         
         if self.arg.resume:
-            checkpoint = torch.load(self.arg.resume, map_location=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"))
+            checkpoint = self._resume_checkpoint
             saved_groups = checkpoint['optimizer_state_dict']['param_groups']
             if len(saved_groups) != len(self.optimizer.param_groups):
                 raise ValueError('Optimizer groups differ from the checkpoint.')
@@ -611,6 +643,10 @@ class Processor():
             yaml.dump(arg_dict, f)
 
     def adjust_learning_rate(self, epoch):
+        if self.arg.fixed_lr:
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = float(self.arg.base_lr)
+            return float(self.arg.base_lr)
         if self.arg.optimizer == 'SGD' or self.arg.optimizer == 'Adam' or self.arg.optimizer == 'NAdam':
             if epoch < self.arg.warm_up_epoch:
                 lr = self.arg.base_lr * (epoch + 1) / self.arg.warm_up_epoch
@@ -666,7 +702,8 @@ class Processor():
         torch.cuda.reset_peak_memory_stats(self.output_device)
         epoch_started = time.perf_counter()
         process = tqdm(loader, ncols=40)
-        use_amp = self.arg.precision == 'bf16'
+        use_amp = self.arg.precision != 'fp32'
+        amp_dtype = torch.float16 if self.arg.precision == 'fp16' else torch.bfloat16
         # torch.autograd.set_detect_anomaly(True)
 
         # texts = classes # n_cls 77
@@ -689,7 +726,7 @@ class Processor():
 
             # print(label)
             
-            with torch.cuda.amp.autocast(enabled=use_amp, dtype=torch.bfloat16):
+            with torch.autocast(device_type='cuda', enabled=use_amp, dtype=amp_dtype):
                 # output, z = self.model(data, F.one_hot(label, num_classes=self.model.module.num_class))
                 # texts = texts.to('cuda')
                 # label = label.to('cuda')
@@ -726,9 +763,17 @@ class Processor():
 
             # backward
             self.optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            if self.scaler.is_enabled():
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                self.optimizer.step()
             # nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-            self.optimizer.step()
+            if batch_idx == 0:
+                self.print_log('AMP enabled: {}; forward dtype: {}; GradScaler enabled: {}; scale: {}.'.format(
+                    use_amp, output.dtype, self.scaler.is_enabled(), self.scaler.get_scale()))
 
             predict_label = output.detach().argmax(dim=1)
             acc = (predict_label == label).float().mean()
@@ -756,6 +801,15 @@ class Processor():
         if batch_count == 0:
             raise RuntimeError('Training loader produced no batches; check batch-size and dataset size')
         mean_loss, mean_aux, mean_acc = (metric_sum / batch_count).cpu().tolist()
+        self.last_train_metrics = {
+            'train_seconds': float(elapsed),
+            'samples_per_second': float(sample_count / elapsed),
+            'train_loss': float(mean_loss),
+            'train_top1_percent': float(mean_acc * 100),
+            'peak_cuda_mib': float(torch.cuda.max_memory_allocated(self.output_device) / 1024 ** 2),
+            'amp_scale': float(self.scaler.get_scale()),
+            'forward_dtype': str(output.dtype),
+        }
         self.print_log(
             '\tMean training loss: {:.4f}. loss2: {:.4f}. Mean training acc: {:.2f}%.'.format(mean_loss, mean_aux, mean_acc * 100))
         self.print_log('\tTraining: {:.1f} seconds, {:.1f} samples/second (including data loading).'.format(
@@ -770,7 +824,8 @@ class Processor():
             filename= self.arg.model_saved_name + '-' + str(epoch+1) + '-' + str(int(self.global_step)) + '.pt'
             # epoch_saving(epoch, self.model.module, self.optimizer, filename)
             epoch_saving(epoch, self.model, self.optimizer, filename,
-                         global_step=int(self.global_step))
+                         global_step=int(self.global_step), scaler=self.scaler,
+                         epoch_records=self.epoch_records, run_config=self.run_config)
             # epoch_saving_2(epoch, self.model, self.optimizer, self.lr_scheduler, filename)
 
     def eval(self, epoch, save_score=False, loader_name=['test'], wrong_file=None, result_file=None):
@@ -871,6 +926,9 @@ class Processor():
             if 'ucla' in self.arg.feeder:
                 self.data_loader[ln].dataset.sample_name = np.arange(len(score))
             accuracy = self.data_loader[ln].dataset.top_k(score, 1)
+            if self.arg.screening and (not np.isfinite(accuracy) or not np.isfinite(loss)):
+                raise RuntimeError('Non-finite evaluation metric; checkpoint was not advanced')
+            self.last_eval_metrics = {'top1_percent': float(accuracy * 100), 'test_loss': float(loss)}
 
             if self.arg.ema:
                 accuracy_ema = self.data_loader[ln].dataset.top_k(score_ema, 1)
@@ -948,6 +1006,26 @@ class Processor():
                     writer.writerow(each_acc_ema)
                     writer.writerows(confusion_ema)
 
+    def save_training_checkpoint(self, epoch, path):
+        epoch_saving(
+            epoch, self.model, self.optimizer, path,
+            global_step=int(self.global_step), best_accuracy=self.best_acc,
+            best_epoch=self.best_acc_epoch, scaler=self.scaler,
+            epoch_records=self.epoch_records, run_config=self.run_config,
+        )
+
+    def finish_screening(self):
+        self.save_training_checkpoint(self.arg.num_epoch - 1, self.arg.model_saved_name + '-final.pt')
+        summary = write_run_results(
+            self.arg.work_dir, self.epoch_records, self.run_config,
+            completed=True, best_accuracy=self.best_acc,
+        )
+        window = summary['stability']
+        self.print_log('SCREENING COMPLETE: stability={}; final_mean_top1_percent={}; best_top1_percent={:.4f}'.format(
+            window['status'], window['final_mean_top1_percent'], self.best_acc * 100))
+        self.print_log('Results: {}/results.json; checkpoints: runs-latest.pt / runs-best.pt / runs-final.pt'.format(
+            self.arg.work_dir))
+
     def start(self):
         if self.arg.phase == 'train':
             self.print_log('Parameters:\n{}\n'.format(str(vars(self.arg))))
@@ -962,15 +1040,21 @@ class Processor():
             def count_parameters(model):
                 return sum(p.numel() for p in model.parameters() if p.requires_grad)
             self.print_log(f'# Parameters: {count_parameters(self.model)}')
-            self.print_log('Learning rate: manual warmup {} epochs, base {}, '
+            self.print_log('Learning rate: fixed={}, manual warmup {} epochs, base {}, '
                            'step {}, decay {}.'.format(
-                               self.arg.warm_up_epoch, self.arg.base_lr,
+                               self.arg.fixed_lr, self.arg.warm_up_epoch, self.arg.base_lr,
                                self.arg.step, self.arg.lr_decay_rate))
             if self.arg.resume and getattr(self, '_resume_rng_state', None) is not None:
                 from tools.training_rng import restore_rng_state
                 restore_rng_state(self._resume_rng_state)
                 self.print_log('Restored Python, NumPy, Torch and CUDA RNG state at the epoch boundary.')
+            if self.arg.start_epoch >= self.arg.num_epoch:
+                if self.arg.screening and self.arg.start_epoch == self.arg.num_epoch:
+                    self.finish_screening()
+                    return
+                raise ValueError('start_epoch must be below num_epoch')
             for epoch in range(self.arg.start_epoch, self.arg.num_epoch):
+                epoch_started = time.perf_counter()
                 # Always save the final epoch so short smoke runs (for example,
                 # num_epoch=1 with the default save_epoch=10) still produce a
                 # checkpoint for the best-model evaluation below.
@@ -979,25 +1063,42 @@ class Processor():
                     and (epoch + 1) > self.arg.save_epoch
                 )
                 # self.lr_scheduler.step(epoch)
-                self.train(epoch, save_model=save_model)
+                self.train(epoch, save_model=save_model and not self.arg.screening)
                 if self.arg.ema:
                     ema_update(self.model, self.model_ema, itr=epoch)
                 previous_best = self.best_acc
+                eval_started = time.perf_counter()
                 self.eval(epoch, save_score=self.arg.save_score, loader_name=['test'])
+                torch.cuda.synchronize(self.output_device)
+                eval_seconds = time.perf_counter() - eval_started
+                record = {
+                    'epoch': epoch + 1,
+                    **self.last_eval_metrics,
+                    'learning_rate': float(self.optimizer.param_groups[0]['lr']),
+                    **self.last_train_metrics,
+                    'eval_seconds': float(eval_seconds),
+                    'epoch_seconds': float(time.perf_counter() - epoch_started),
+                }
+                self.epoch_records.append(record)
+                remaining = self.arg.num_epoch - epoch - 1
+                eta = sum(row['epoch_seconds'] for row in self.epoch_records) / len(self.epoch_records) * remaining
+                self.print_log('EPOCH_RESULT epoch={}/{} top1={:.4f}% lr={:.8g} '
+                               'seconds={:.1f} train_seconds={:.1f} eval_seconds={:.1f} ETA_minutes={:.1f}'.format(
+                                   epoch + 1, self.arg.num_epoch, record['top1_percent'], record['learning_rate'],
+                                   record['epoch_seconds'], record['train_seconds'], eval_seconds, eta / 60))
                 if self.best_acc > previous_best:
                     # The best epoch need not coincide with a periodic save.
-                    epoch_saving(epoch, self.model, self.optimizer,
-                                 self.arg.model_saved_name + '-best.pt',
-                                 global_step=int(self.global_step),
-                                 best_accuracy=self.best_acc,
-                                 best_epoch=self.best_acc_epoch)
+                    self.save_training_checkpoint(epoch, self.arg.model_saved_name + '-best.pt')
 
                 if self.arg.save_latest:
-                    epoch_saving(epoch, self.model, self.optimizer,
-                                 self.arg.model_saved_name + '-latest.pt',
-                                 global_step=int(self.global_step),
-                                 best_accuracy=self.best_acc,
-                                 best_epoch=self.best_acc_epoch)
+                    self.save_training_checkpoint(epoch, self.arg.model_saved_name + '-latest.pt')
+                if self.arg.screening:
+                    write_run_results(self.arg.work_dir, self.epoch_records, self.run_config,
+                                      best_accuracy=self.best_acc)
+
+            if self.arg.screening:
+                self.finish_screening()
+                return
 
             # test the best model
             weights_path = self.arg.model_saved_name + '-best.pt'

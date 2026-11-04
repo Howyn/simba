@@ -1,0 +1,61 @@
+# Shared protocol with joint_mti_enabled15.yaml; only work_dir/use_mti differ.
+work_dir: ./work_dir/ntu60/xsub/mti_fixed15/mti_seed4321
+seed: 4321
+feeder: feeders.feeder_ntu.Feeder
+train_feeder_args:
+  data_path: /root/autodl-tmp/ntu60/ntu/NTU60_CS.npz
+  split: train
+  debug: false
+  random_choose: false
+  random_shift: false
+  random_move: false
+  window_size: 64
+  normalization: false
+  random_rot: true
+  p_interval: [0.5, 1]
+  vel: false
+  bone: false
+test_feeder_args:
+  data_path: /root/autodl-tmp/ntu60/ntu/NTU60_CS.npz
+  split: test
+  window_size: 64
+  p_interval: [0.95]
+  vel: false
+  bone: false
+  debug: false
+model: model.Hyperformer.Model
+model_args:
+  use_mti: true
+  num_class: 60
+  num_point: 25
+  num_person: 2
+  graph: graph.ntu_rgb_d.Graph
+  graph_args:
+    labeling_mode: spatial
+  joint_label: [0, 4, 2, 2, 2, 2, 1, 1, 2, 2, 1, 1, 2, 3, 3, 3, 2, 3, 3, 3, 1, 0, 1, 0, 1]
+optimizer: SGD
+momentum: 0.9
+nesterov: true
+weight_decay: 0.0004
+base_lr: 0.005
+fixed_lr: true
+lr_type: constant
+lr_decay_rate: 1.0
+step: []
+warm_up_epoch: 0
+device: [0]
+batch_size: 16
+test_batch_size: 16
+num_worker: 8
+prefetch_factor: 2
+persistent_workers: false
+precision: fp16
+tf32: false
+num_epoch: 15
+eval_interval: 1
+save_interval: 15
+save_epoch: 0
+save_latest: true
+strict_rng_resume: true
+screening: true
+ema: false
