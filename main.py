@@ -391,7 +391,10 @@ class Processor():
         else:
             self.load_optimizer()
             # self.load_lr_scheduler()
-            self.scaler = torch.amp.GradScaler('cuda', enabled=arg.precision == 'fp16')
+            self.scaler = torch.amp.GradScaler(
+                'cuda', enabled=arg.precision != 'fp32',
+                init_scale=1.0 if arg.precision == 'bf16' else 65536.0,
+            )
             if arg.resume:
                 scaler_state = self._resume_checkpoint.get('scaler_state_dict')
                 if arg.screening and not scaler_state:
@@ -752,6 +755,12 @@ class Processor():
                 # lambda_1=1e-4
                 # lambda_2=1e-1
                 # loss = lambda_2* mmd_loss + lambda_1* l2_z_mean + loss
+            if not torch.isfinite(loss.detach()).item():
+                raise RuntimeError(
+                    'Non-finite loss before backward: epoch={}, batch={}, precision={}, '
+                    'input_finite={}, output_finite={}'.format(
+                        epoch + 1, batch_idx + 1, self.arg.precision,
+                        torch.isfinite(data).all().item(), torch.isfinite(output).all().item()))
             # With FR enabled the model returns the weighted auxiliary loss as
             # its second output. Baseline models keep returning the old value.
             loss2 = torch.zeros_like(loss)

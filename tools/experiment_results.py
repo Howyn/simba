@@ -33,8 +33,8 @@ def validate_screening(args):
         raise ValueError('base_lr must be positive and finite')
     if not 1 <= args.num_epoch <= 15:
         raise ValueError('screening is capped at 15 epochs')
-    if args.precision != 'fp16':
-        raise ValueError('this screening uses FP16 autocast with GradScaler in both runs')
+    if args.precision not in ('fp16', 'bf16'):
+        raise ValueError('screening requires AMP (fp16 or bf16) with matching precision in both runs')
     if len(args.device) != 1 or args.ema:
         raise ValueError('screening requires one GPU and ema=false')
     if args.weights or (args.start_epoch != 0 and not args.resume):

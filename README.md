@@ -166,4 +166,4 @@ training schedule is introduced in this restoration.
 The optional `model_args.use_mti` switch adds only the temporal MTI module from
 TSkel-Mamba. It defaults to false. See [MTI_EXPERIMENT.md](MTI_EXPERIMENT.md)
 for the paper attribution, explicit adaptation conventions, paired fixed-LR
-15-epoch FP16 AMP protocol, AutoDL background commands and checkpoint recovery.
+15-epoch BF16 AMP protocol, AutoDL background commands and checkpoint recovery.

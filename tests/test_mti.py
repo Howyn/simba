@@ -138,6 +138,8 @@ class MambaWrapperTests(unittest.TestCase):
 @unittest.skipUnless(torch.cuda.is_available(), 'CUDA fused Mamba requires an AutoDL GPU environment')
 class CUDAMambaMTITests(unittest.TestCase):
     def test_real_mamba_parity_and_amp_backward(self):
+        if not torch.cuda.is_bf16_supported():
+            self.skipTest('BF16 is required for this screening protocol')
         sys.path.insert(0, str(ROOT))
         from mamba_blocks import MambaBlock
         torch.manual_seed(13)
@@ -150,9 +152,9 @@ class CUDAMambaMTITests(unittest.TestCase):
         with torch.no_grad():
             expected = baseline.dropout(baseline.norm(baseline.mamba(x) + x))
             torch.testing.assert_close(baseline(x), expected, rtol=0, atol=0)
-        scaler = torch.amp.GradScaler('cuda', init_scale=128)
+        scaler = torch.amp.GradScaler('cuda', init_scale=1)
         optimizer = torch.optim.SGD(improved.parameters(), lr=0.005)
-        with torch.autocast('cuda', dtype=torch.float16):
+        with torch.autocast('cuda', dtype=torch.bfloat16):
             values = improved(x).float()
             loss = (values * torch.randn_like(values)).mean()
         scaler.scale(loss).backward()
@@ -164,6 +166,8 @@ class CUDAMambaMTITests(unittest.TestCase):
         scaler.update()
 
     def test_full_model_common_weights_and_amp_backward(self):
+        if not torch.cuda.is_bf16_supported():
+            self.skipTest('BF16 is required for this screening protocol')
         sys.path.insert(0, str(ROOT))
         import yaml
         from model.Hyperformer import Model
@@ -183,7 +187,7 @@ class CUDAMambaMTITests(unittest.TestCase):
         del baseline, state
         x = torch.randn(1, 3, 64, 25, 2, device='cuda')
         label = torch.tensor([3], device='cuda')
-        with torch.autocast('cuda', dtype=torch.float16):
+        with torch.autocast('cuda', dtype=torch.bfloat16):
             output, _ = improved(x, torch.nn.functional.one_hot(label, 60))
             loss = torch.nn.functional.cross_entropy(output, label)
         self.assertTrue(torch.isfinite(loss))

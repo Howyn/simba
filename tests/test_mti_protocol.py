@@ -69,7 +69,7 @@ class MTIProtocolTests(unittest.TestCase):
     def test_resume_rejects_learning_rate_seed_precision_and_variant_changes(self):
         config = training_signature(self.configs()[0])
         check_resume_signature(config, copy.deepcopy(config))
-        for key, value in [('base_lr', 0.001), ('seed', 123), ('precision', 'bf16')]:
+        for key, value in [('base_lr', 0.001), ('seed', 123), ('precision', 'fp16')]:
             changed = copy.deepcopy(config)
             changed[key] = value
             with self.assertRaises(ValueError):

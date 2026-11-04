@@ -101,7 +101,7 @@ def main():
             'started_unix': time.time(), 'status': 'running', 'launcher_pid': os.getpid(),
         }
         atomic_text(work_dir / 'launcher_status.json', json.dumps(status, indent=2) + '\n')
-        print(f'Launching ONLY {args.variant}, seed={args.seed}; fixed LR=0.005; FP16 AMP; 15 epochs.', flush=True)
+        print(f"Launching ONLY {args.variant}, seed={args.seed}; fixed LR=0.005; {config['precision']} AMP; 15 epochs.", flush=True)
         print(f'Python: {sys.executable}\nWork directory: {work_dir}', flush=True)
         environment = os.environ.copy()
         environment['PYTHONUNBUFFERED'] = '1'

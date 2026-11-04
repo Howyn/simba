@@ -35,13 +35,18 @@ Mamba 单向扫描、状态维度和全局池化均保留。没有加入双向�
 | 权重衰减 | 0.0004 |
 | 学习率 | **0.005，从 epoch 0 起固定**，无预热、无衰减 |
 | batch size | 训练 16，评估 16 |
-| 精度 | 训练 FP16 autocast + GradScaler；评估 FP32 |
+| 精度 | 训练 BF16 autocast + GradScaler（初始 scale=1）；评估 FP32 |
 | 数据加载 | workers=8，pin_memory=true，prefetch=2，persistent_workers=false |
 | 时长 | 15 epoch，每个 epoch 评估并保存 latest |
 | 显卡 | 单卡，进程内 GPU 0；不使用 DDP |
 
 0.005 是本轮初筛选定的学习率，不是已经证实的最优值，也不保证比 0.025
 更快收敛。两组共用它；本轮不允许只给一组调参。
+最初 FP16 配置在基线第一轮出现非有限训练指标，因此两组统一改为 BF16 AMP，
+保留 GradScaler，初始 scale=1。此项调整用于规避 FP16 的有限数值范围，尚需
+在实际显卡上验证。失败的 FP16 运行不参与比较，也不从其权重恢复；重新从头
+运行两组，并用新的 `--output-root`（例如 `work_dir/ntu60/xsub/mti_bf16_v2`）。
+若 BF16 仍出现非有限损失，日志会报告具体 batch 及输入/输出是否有限，供继续定位。
 两个 YAML 除 `work_dir` 和 `model_args.use_mti` 外完全相同；原 `joint_autodl.yaml`
 保留，不要用它启动本轮初筛。
 
