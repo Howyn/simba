@@ -128,7 +128,10 @@ def write_run_results(work_dir, records, run_config, *, completed=False, best_ac
     records = sorted(records, key=lambda row: row['epoch'])
     summary = {
         'completed': completed,
-        'variant': ('bimamba' if run_config['model_args'].get('use_bimamba', False)
+        'variant': ('combined' if run_config['model_args'].get('use_hypergcn', False) and run_config['model_args'].get('use_detgc', False)
+                    else 'spatial' if run_config['model_args'].get('use_hypergcn', False)
+                    else 'temporal' if run_config['model_args'].get('use_detgc', False)
+                    else 'bimamba' if run_config['model_args'].get('use_bimamba', False)
                     else 'mti' if run_config['model_args'].get('use_mti', False) else 'baseline'),
         'seed': run_config['seed'],
         'evaluation_split': 'official NTU60 X-Sub test split',

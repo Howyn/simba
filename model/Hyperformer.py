@@ -634,10 +634,15 @@ class TCN_ViT_unit(nn.Module):
 
 class Model(nn.Module):
     def __init__(self, num_class=400, num_point=18, num_person=2, graph=None, graph_args=dict(), in_channels=3,
-                 drop_out=0, num_of_heads=9, joint_label=[], use_mti=False, use_bimamba=False, **kwargs):
+                 drop_out=0, num_of_heads=9, joint_label=[], use_mti=False, use_bimamba=False,
+                 use_hypergcn=False, use_detgc=False, **kwargs):
         super(Model, self).__init__()
         if use_mti and use_bimamba:
             raise ValueError('enable only one experiment: MTI or BiMamba')
+        if (use_hypergcn or use_detgc) and (use_mti or use_bimamba):
+            raise ValueError('combination1 must use the original Mamba, without MTI/BiMamba')
+        if (use_hypergcn or use_detgc) and (num_point != 25 or num_of_heads != 9):
+            raise ValueError('combination1 is defined for NTU 25 joints and 216 feature channels')
 
         if graph is None:
             raise ValueError()
@@ -709,6 +714,18 @@ class Model(nn.Module):
             self.drop_out = nn.Dropout(drop_out)
         else:
             self.drop_out = lambda x: x
+
+        # Construct baseline first, including all original RNG draws. Replacements
+        # cannot perturb common weights or the subsequent sampler/augmentation RNG.
+        if use_hypergcn or use_detgc:
+            from model.combination1 import HyperGraphSpatial, MultiScaleDeformableTemporal
+            with torch.random.fork_rng(devices=[]):
+                if use_hypergcn:
+                    for index in (4, 7, 10):
+                        getattr(self, f'l{index}').shift_gcn = HyperGraphSpatial(216, A)
+                if use_detgc:
+                    for index in (5, 8):
+                        getattr(self, f'l{index}').tcn1 = MultiScaleDeformableTemporal(216, stride=2)
 
         # self.transformer = Transformer(
         #     width=transformer_width,

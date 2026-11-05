@@ -163,6 +163,11 @@ training schedule is introduced in this restoration.
 
 ## MTI screening experiment
 
+Current experiment: [Combination1 short10](COMBINATION1_EXPERIMENT.md),
+Hyper-GCN spatial + DeGCN temporal adapters. Only the combined variant is launched;
+the previous verified short10 baseline is reused. Includes AutoDL background,
+checkpoint resume and cancellable shutdown after a 5-minute delay.
+
 The optional `model_args.use_mti` switch adds only the temporal MTI module from
 TSkel-Mamba. It defaults to false. See [MTI_EXPERIMENT.md](MTI_EXPERIMENT.md)
 for the paper attribution, explicit adaptation conventions, paired fixed-LR
