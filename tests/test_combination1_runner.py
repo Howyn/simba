@@ -1,5 +1,6 @@
 """Baseline-reuse, comparison and shutdown controls; never shuts down a machine."""
 from contextlib import nullcontext
+import errno
 import json
 from pathlib import Path
 import subprocess
@@ -81,6 +82,27 @@ class RunnerTests(unittest.TestCase):
             with patch.object(runner.subprocess, 'run', side_effect=run), patch.object(runner.os, 'sync', create=True):
                 runner.wait_and_shutdown(Path(directory), 300, sleep=sleep, monotonic=lambda: clock[0])
             self.assertEqual(calls[-1], (300.0, ['/usr/bin/shutdown']))
+
+    def test_shutdown_enoexec_shell_wrapper_fallback(self):
+        failure = OSError(errno.ENOEXEC, 'Exec format error')
+        success = subprocess.CompletedProcess([], 0)
+        with patch.object(runner.Path, 'read_bytes', return_value=b'echo stopping\n'), \
+             patch.object(runner.subprocess, 'run', side_effect=[failure, success, success]) as run:
+            self.assertEqual(runner.call_autodl_shutdown().returncode, 0)
+        self.assertEqual([call.args[0] for call in run.call_args_list], [
+            ['/usr/bin/shutdown'], ['/bin/bash', '-n', '/usr/bin/shutdown'],
+            ['/bin/bash', '/usr/bin/shutdown']])
+
+    def test_shutdown_does_not_fallback_for_permission_or_binary_errors(self):
+        with patch.object(runner.subprocess, 'run', side_effect=OSError(errno.EACCES, 'denied')) as run:
+            with self.assertRaises(OSError):
+                runner.call_autodl_shutdown()
+            self.assertEqual(run.call_count, 1)
+        with patch.object(runner.subprocess, 'run', side_effect=OSError(errno.ENOEXEC, 'format')) as run, \
+             patch.object(runner.Path, 'read_bytes', return_value=b'\x7fELF\x00'):
+            with self.assertRaises(RuntimeError):
+                runner.call_autodl_shutdown()
+            self.assertEqual(run.call_count, 1)
 
     def test_variant_labels_and_invalid_lr(self):
         with tempfile.TemporaryDirectory() as directory:

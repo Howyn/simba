@@ -81,6 +81,8 @@ echo "启动进程：$!"
 **作业成功或报错退出后都等待300秒关机**，省去失败后的空转费用。
 使用 [AutoDL 官方方式](https://www.autodl.com/docs/save_money/) `/usr/bin/shutdown`，
 不使用可能不兼容的宿主机 shutdown 参数。不会在第一个 epoch 后关机。
+若镜像提供没有 shebang 的文本 shell 包装器、直接执行报 ENOEXEC，脚本会先用
+`bash -n` 检查语法，再通过 `/bin/bash /usr/bin/shutdown` 执行；不对二进制或权限错误盲目重试。
 若另一 GPU 任务出现，或 GPU 空闲查询失败，脚本跳过关机并写入原因。
 代码不会在本地 Windows 执行关机。
 

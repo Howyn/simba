@@ -4,6 +4,7 @@ Default: combined Hyper-GCN + DeTGC. No baseline or ablation training is chained
 The opt-in AutoDL shutdown waits until this entire job exits, including failure.
 """
 import argparse
+import errno
 import json
 import math
 import os
@@ -85,6 +86,28 @@ def compare(root, variant, seed, baseline, improved):
     print(f'COMPARISON RESULT: {verdict}; {root / (name + ".md")}', flush=True)
 
 
+def call_autodl_shutdown():
+    program = Path('/usr/bin/shutdown')
+    command_path = program.as_posix()
+    try:
+        return subprocess.run([command_path], timeout=30)
+    except OSError as error:
+        if error.errno != errno.ENOEXEC:
+            raise
+        # Some AutoDL images provide a shell wrapper without a shebang. Direct
+        # execve fails although the documented shell invocation works. Do not
+        # reinterpret an incompatible binary as shell source.
+        prefix = program.read_bytes()[:4096]
+        if not prefix or b'\x00' in prefix or prefix.startswith(b'\x7fELF'):
+            raise RuntimeError('shutdown has an unsupported executable format') from error
+        prefix.decode('utf-8')
+        syntax = subprocess.run(['/bin/bash', '-n', command_path], timeout=10)
+        if syntax.returncode:
+            raise RuntimeError('shutdown is not a valid shell wrapper') from error
+        print('AUTODL SHUTDOWN: ENOEXEC; invoking the text wrapper with /bin/bash', flush=True)
+        return subprocess.run(['/bin/bash', command_path], timeout=30)
+
+
 def wait_and_shutdown(root, delay, *, sleep=time.sleep, monotonic=time.monotonic):
     """AutoDL official /usr/bin/shutdown, invoked ONLY after the countdown.
 
@@ -115,10 +138,10 @@ def wait_and_shutdown(root, delay, *, sleep=time.sleep, monotonic=time.monotonic
         print('AUTODL SHUTDOWN NOW', flush=True)
         if hasattr(os, 'sync'):
             os.sync()
-        result = subprocess.run(['/usr/bin/shutdown'], timeout=30)
+        result = call_autodl_shutdown()
         if result.returncode:
             raise RuntimeError('AutoDL shutdown returned exit=' + str(result.returncode))
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+    except (OSError, RuntimeError, UnicodeError, subprocess.TimeoutExpired) as error:
         atomic_text(root / 'shutdown_status.json', json.dumps(dict(status='shutdown_not_executed_or_failed',
                                                                  error=str(error))) + '\n')
         print('AUTODL SHUTDOWN FAILED/SKIPPED: ' + str(error), flush=True)
