@@ -448,11 +448,11 @@ class unit_vit(nn.Module):
         return x
 
 class TCN_ViT_unit(nn.Module):
-    def __init__(self, in_channels, out_channels, A, stride=1, num_of_heads=6, residual=True, kernel_size=5, dilations=[1,2], pe=False, num_point=25, layer=0, use_mti=False):
+    def __init__(self, in_channels, out_channels, A, stride=1, num_of_heads=6, residual=True, kernel_size=5, dilations=[1,2], pe=False, num_point=25, layer=0, use_mti=False, use_bimamba=False):
         super(TCN_ViT_unit, self).__init__()
         # Flattened joint/channel features are fed to Mamba.  500 only
         # matches UCLA's 20 joints x 25 channels; NTU uses 25 joints.
-        self.mamba = MambaBlock(embed_dim=num_point * 25, use_mti=use_mti, num_point=num_point)
+        self.mamba = MambaBlock(embed_dim=num_point * 25, use_mti=use_mti, num_point=num_point, use_bimamba=use_bimamba)
         # self.mamba_2 = MambaBlock(embed_dim=512)
         self.shift_gcn = Shift_gcn(in_channels,out_channels,A)
         self.shift_gcn_2 = Shift_gcn(out_channels,108,A).to('cuda')
@@ -634,8 +634,10 @@ class TCN_ViT_unit(nn.Module):
 
 class Model(nn.Module):
     def __init__(self, num_class=400, num_point=18, num_person=2, graph=None, graph_args=dict(), in_channels=3,
-                 drop_out=0, num_of_heads=9, joint_label=[], use_mti=False, **kwargs):
+                 drop_out=0, num_of_heads=9, joint_label=[], use_mti=False, use_bimamba=False, **kwargs):
         super(Model, self).__init__()
+        if use_mti and use_bimamba:
+            raise ValueError('enable only one experiment: MTI or BiMamba')
 
         if graph is None:
             raise ValueError()
@@ -653,18 +655,18 @@ class Model(nn.Module):
         self.joint_label = joint_label
 
 
-        self.l1 = TCN_ViT_unit(3, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=1, use_mti=use_mti)
+        self.l1 = TCN_ViT_unit(3, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=1, use_mti=use_mti, use_bimamba=use_bimamba)
         # * num_heads, effect of concatenation following the official implementation
-        self.l2 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=2, use_mti=use_mti)
-        self.l3 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=3, use_mti=use_mti)
-        self.l4 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=4, use_mti=use_mti)
-        self.l5 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=5, use_mti=use_mti)
-        self.l6 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=6, use_mti=use_mti)
-        self.l7 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=7, use_mti=use_mti)
+        self.l2 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=2, use_mti=use_mti, use_bimamba=use_bimamba)
+        self.l3 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=3, use_mti=use_mti, use_bimamba=use_bimamba)
+        self.l4 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=4, use_mti=use_mti, use_bimamba=use_bimamba)
+        self.l5 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=5, use_mti=use_mti, use_bimamba=use_bimamba)
+        self.l6 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=6, use_mti=use_mti, use_bimamba=use_bimamba)
+        self.l7 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=7, use_mti=use_mti, use_bimamba=use_bimamba)
         # self.l8 = TCN_ViT_unit(24 * num_of_heads, 24 * num_of_heads, A, num_of_heads=num_of_heads)
-        self.l8 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=8, use_mti=use_mti)
-        self.l9 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9, use_mti=use_mti)
-        self.l10 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=10, use_mti=use_mti)
+        self.l8 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, stride=2, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=8, use_mti=use_mti, use_bimamba=use_bimamba)
+        self.l9 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9, use_mti=use_mti, use_bimamba=use_bimamba)
+        self.l10 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=10, use_mti=use_mti, use_bimamba=use_bimamba)
         # self.l11 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9)
         # self.l12 = TCN_ViT_unit(24*num_of_heads, 24*num_of_heads, A, residual=True, num_of_heads=num_of_heads, pe=True, num_point=num_point, layer=9)
 

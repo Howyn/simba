@@ -34,7 +34,7 @@ import resource
 import copy
 import tempfile
 from tools.experiment_results import (
-    check_resume_signature, training_signature, validate_screening, write_run_results,
+    check_resume_signature, planned_learning_rate, training_signature, validate_screening, write_run_results,
 )
 from torch import linalg as LA
 # import torch.multiprocessing
@@ -332,9 +332,11 @@ def get_parser():
     parser.add_argument('--fixed-lr', type=str2bool, default=False,
                         help='use base-lr from epoch 0 without warmup or decay')
     parser.add_argument('--screening', type=str2bool, default=False,
-                        help='paired single-GPU fixed-LR AMP screening, at most 15 epochs')
+                        help='paired single-GPU AMP screening, at most 15 epochs')
+    parser.add_argument('--screening-protocol', choices=('fixed15', 'short10'), default='fixed15',
+                        help='legacy fixed LR or the locked 10-epoch warmup/decay protocol')
     parser.add_argument('--stop-after-epoch', type=int, default=None,
-                        help='pause screening after this epoch without changing the 15-epoch resume target')
+                        help='pause screening after this epoch without changing the configured resume target')
     parser.add_argument('--save-latest', type=str2bool, default=False,
                         help='atomically save runs-latest.pt after each evaluated epoch for recovery')
     parser.add_argument('--strict-rng-resume', type=str2bool, default=False,
@@ -648,6 +650,12 @@ class Processor():
             yaml.dump(arg_dict, f)
 
     def adjust_learning_rate(self, epoch):
+        if getattr(self.arg, 'screening_protocol', 'fixed15') == 'short10':
+            lr = planned_learning_rate(epoch, self.arg.base_lr, self.arg.warm_up_epoch,
+                                       self.arg.step, self.arg.lr_decay_rate)
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = lr
+            return lr
         if self.arg.fixed_lr:
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = float(self.arg.base_lr)

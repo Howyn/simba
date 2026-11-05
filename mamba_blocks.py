@@ -5,9 +5,15 @@ import torch.nn as nn
 
 
 class MambaBlock(nn.Module):
-    def __init__(self, embed_dim, dropout_level=0, use_mti=False, num_point=25):
+    def __init__(self, embed_dim, dropout_level=0, use_mti=False, num_point=25, use_bimamba=False):
         super().__init__()
-        self.mamba = Mamba(d_model=embed_dim, d_state=16, d_conv=4, expand=2)
+        if use_mti and use_bimamba:
+            raise ValueError('enable only one experiment: MTI or BiMamba')
+        if use_bimamba:
+            from mamba_ssm.modules.bimamba import BiMambaV2
+            self.mamba = BiMambaV2(d_model=embed_dim, d_state=16, d_conv=4, expand=2)
+        else:
+            self.mamba = Mamba(d_model=embed_dim, d_state=16, d_conv=4, expand=2)
         self.norm = RMSNorm(embed_dim)
         self.dropout = nn.Dropout(dropout_level)
         self.use_mti = use_mti

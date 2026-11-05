@@ -1,4 +1,4 @@
-"""Fixed-LR screening metadata and atomic result files (top-1 in percent)."""
+"""Paired screening protocols and atomic result files (top-1 in percent)."""
 
 import csv
 import io
@@ -21,7 +21,17 @@ SIGNATURE_KEYS = (
 def training_signature(args):
     values = vars(args) if not isinstance(args, dict) else args
     # Make an independent snapshot using only checkpoint-safe built-in types.
-    return json.loads(json.dumps({key: values[key] for key in SIGNATURE_KEYS}))
+    result = {key: values[key] for key in SIGNATURE_KEYS}
+    # Old fixed15 checkpoints had no protocol field; retain their exact signature.
+    if values.get('screening_protocol', 'fixed15') != 'fixed15':
+        result['screening_protocol'] = values['screening_protocol']
+    return json.loads(json.dumps(result))
+
+
+def planned_learning_rate(epoch, base_lr, warmup_epochs, milestones, decay):
+    if epoch < warmup_epochs:
+        return float(base_lr * (epoch + 1) / warmup_epochs)
+    return float(base_lr * decay ** sum(epoch >= milestone for milestone in milestones))
 
 
 def validate_screening(args):
@@ -30,8 +40,22 @@ def validate_screening(args):
         raise ValueError('stop_after_epoch requires screening and must be between 1 and num_epoch')
     if not args.screening:
         return
-    if not args.fixed_lr or args.warm_up_epoch != 0 or args.step:
-        raise ValueError('screening requires fixed_lr=true, warm_up_epoch=0, step=[]')
+    protocol = getattr(args, 'screening_protocol', 'fixed15')
+    if protocol == 'short10':
+        expected = dict(fixed_lr=False, warm_up_epoch=2, step=[6], base_lr=0.025,
+                        lr_decay_rate=0.1, lr_type='multistep', num_epoch=10,
+                        optimizer='SGD', batch_size=24, test_batch_size=64,
+                        precision='bf16', tf32=True, num_worker=8)
+        changed = [key for key, value in expected.items() if getattr(args, key, None) != value]
+        if changed:
+            raise ValueError('short10 protocol differs: ' + ', '.join(changed))
+        if args.model_args.get('use_mti', False):
+            raise ValueError('short10 BiMamba experiment must not enable MTI')
+    elif protocol == 'fixed15':
+        if not args.fixed_lr or args.warm_up_epoch != 0 or args.step:
+            raise ValueError('screening requires fixed_lr=true, warm_up_epoch=0, step=[]')
+    else:
+        raise ValueError('unknown screening protocol: ' + str(protocol))
     if not math.isfinite(args.base_lr) or args.base_lr <= 0:
         raise ValueError('base_lr must be positive and finite')
     if not 1 <= args.num_epoch <= 15:
@@ -50,13 +74,15 @@ def check_resume_signature(saved, current):
     if saved is None:
         raise ValueError('screening cannot resume a legacy checkpoint without run_config')
     changed = [key for key in SIGNATURE_KEYS if saved.get(key) != current.get(key)]
+    if saved.get('screening_protocol', 'fixed15') != current.get('screening_protocol', 'fixed15'):
+        changed.append('screening_protocol')
     if changed:
         raise ValueError('resume configuration differs: ' + ', '.join(changed))
 
 
-def stable_window(records):
-    selected = {int(row['epoch']): row for row in records if 10 <= int(row['epoch']) <= 15}
-    epochs = list(range(10, 16))
+def stable_window(records, protocol='fixed15'):
+    epochs = [8, 9, 10] if protocol == 'short10' else list(range(10, 16))
+    selected = {int(row['epoch']): row for row in records if int(row['epoch']) in epochs}
     result = {
         'epochs': epochs,
         'tolerance_percentage_points': 0.2,
@@ -102,12 +128,13 @@ def write_run_results(work_dir, records, run_config, *, completed=False, best_ac
     records = sorted(records, key=lambda row: row['epoch'])
     summary = {
         'completed': completed,
-        'variant': 'mti' if run_config['model_args'].get('use_mti', False) else 'baseline',
+        'variant': ('bimamba' if run_config['model_args'].get('use_bimamba', False)
+                    else 'mti' if run_config['model_args'].get('use_mti', False) else 'baseline'),
         'seed': run_config['seed'],
         'evaluation_split': 'official NTU60 X-Sub test split',
         'run_config': run_config,
         'epochs': records,
-        'stability': stable_window(records),
+        'stability': stable_window(records, run_config.get('screening_protocol', 'fixed15')),
         'best_top1_percent': None if best_accuracy is None else 100 * float(best_accuracy),
         'final_checkpoint': str(Path(work_dir) / 'runs-final.pt') if completed else None,
     }

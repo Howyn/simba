@@ -1,0 +1,63 @@
+# Active paired protocol: both files differ only in work_dir/use_bimamba.
+work_dir: ./work_dir/ntu60/xsub/bimamba_short10_v1/baseline_seed4321
+seed: 4321
+feeder: feeders.feeder_ntu.Feeder
+train_feeder_args:
+  data_path: /root/autodl-tmp/ntu60/ntu/NTU60_CS.npz
+  split: train
+  debug: false
+  random_choose: false
+  random_shift: false
+  random_move: false
+  window_size: 64
+  normalization: false
+  random_rot: true
+  p_interval: [0.5, 1]
+  vel: false
+  bone: false
+test_feeder_args:
+  data_path: /root/autodl-tmp/ntu60/ntu/NTU60_CS.npz
+  split: test
+  window_size: 64
+  p_interval: [0.95]
+  vel: false
+  bone: false
+  debug: false
+model: model.Hyperformer.Model
+model_args:
+  use_mti: false
+  use_bimamba: false
+  num_class: 60
+  num_point: 25
+  num_person: 2
+  graph: graph.ntu_rgb_d.Graph
+  graph_args:
+    labeling_mode: spatial
+  joint_label: [0, 4, 2, 2, 2, 2, 1, 1, 2, 2, 1, 1, 2, 3, 3, 3, 2, 3, 3, 3, 1, 0, 1, 0, 1]
+optimizer: SGD
+momentum: 0.9
+nesterov: true
+weight_decay: 0.0004
+base_lr: 0.025
+fixed_lr: false
+lr_type: multistep
+lr_decay_rate: 0.1
+step: [6]
+warm_up_epoch: 2
+device: [0]
+batch_size: 24
+test_batch_size: 64
+num_worker: 8
+prefetch_factor: 2
+persistent_workers: false
+precision: bf16
+tf32: true
+num_epoch: 10
+eval_interval: 1
+save_interval: 10
+save_epoch: 0
+save_latest: true
+strict_rng_resume: true
+screening: true
+screening_protocol: short10
+ema: false
